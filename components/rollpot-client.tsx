@@ -4,6 +4,7 @@ import AddIcon from "@mui/icons-material/Add";
 import CasinoIcon from "@mui/icons-material/Casino";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import HistoryIcon from "@mui/icons-material/History";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import LocalAtmIcon from "@mui/icons-material/LocalAtm";
 import LoginIcon from "@mui/icons-material/Login";
 import PersonIcon from "@mui/icons-material/Person";
@@ -16,6 +17,9 @@ import {
   CardContent,
   Chip,
   Container,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   LinearProgress,
   Paper,
   Stack,
@@ -76,6 +80,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
   ]);
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [catalogExpanded, setCatalogExpanded] = useState(false);
+  const [detailEntry, setDetailEntry] = useState<EscrowCatalogEntry | null>(null);
   const [playerIdentity, setPlayerIdentity] = useState<EscrowIdentity | null>(null);
   const [playerProfile, setPlayerProfile] = useState<PlayerProfile | null>(null);
   const [appSigner, setAppSigner] = useState<EscrowIdentity | null>(null);
@@ -653,11 +658,12 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
                     return (
                       <Paper key={`${entry.publisher_pubkey}:${entry.identifier}:${entry.source.type}`} variant="outlined" sx={{ p: 1.5 }}>
                       <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
-                        <Box sx={{ minWidth: 0 }}>
+                        <Box sx={{ minWidth: 0, cursor: "pointer" }} onClick={() => setDetailEntry(entry)}>
                           <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
                             <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>{entry.identifier}</Typography>
                             <Chip size="small" label={statusLabel} color={statusColor} />
                             {selected ? <Chip size="small" label="selected" color="primary" /> : null}
+                            <Chip size="small" icon={<InfoOutlinedIcon />} label="Details" variant="outlined" onClick={() => setDetailEntry(entry)} />
                           </Stack>
                           <Typography variant="body2" color="text.secondary">
                             {descriptor?.escrow_type || "Unknown escrow type"} · {descriptor?.networks?.join(", ") || "network not declared"}
@@ -895,7 +901,113 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
           </Stack>
         </Stack>
       </Container>
+
+      <EscrowDetailDialog entry={detailEntry} onClose={() => setDetailEntry(null)} appSigner={appSigner} onSelect={selectService} canSelect={(entry) => entry.compatible && Boolean(entry.service) && isApplicationSignerTrusted(entry.service!, appSigner?.pubkey)} />
     </Box>
+  );
+}
+
+function EscrowDetailDialog({
+  entry,
+  onClose,
+  appSigner,
+  onSelect,
+  canSelect,
+}: {
+  entry: EscrowCatalogEntry | null;
+  onClose: () => void;
+  appSigner: EscrowIdentity | null;
+  onSelect: (service: EscrowService) => void;
+  canSelect: (entry: EscrowCatalogEntry) => boolean;
+}) {
+  if (!entry) return null;
+
+  const candidate = entry.service;
+  const descriptor = entry.descriptor || candidate?.descriptor;
+  const service = descriptor?.service;
+  const signers = service?.decision_signers;
+  const signerTrusted = candidate ? isApplicationSignerTrusted(candidate, appSigner?.pubkey) : false;
+  const selectable = canSelect(entry);
+
+  return (
+    <Dialog open={Boolean(entry)} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontWeight: 900 }}>{entry.identifier}</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2}>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+            <Chip size="small" label={entry.compatibility_status === "discovery_only" ? "Discovery only" : selectable ? "Standalone compatible" : "Standalone incompatible"} color={entry.compatibility_status === "discovery_only" ? "info" : selectable ? "success" : "warning"} />
+            {entry.compatibility_reason ? <Typography variant="caption" color="text.secondary">{entry.compatibility_reason}</Typography> : null}
+          </Stack>
+
+          {entry.publisher_pubkey ? <DetailRow label="Publisher" value={entry.publisher_pubkey} mono /> : null}
+
+          {descriptor ? (
+            <>
+              <DetailRow label="Version" value={String(descriptor.version)} />
+              <DetailRow label="Escrow type" value={descriptor.escrow_type || "—"} />
+              <DetailRow label="Networks" value={descriptor.networks?.join(", ") || "—"} />
+              <DetailRow label="Reference format" value={descriptor.reference_format || "—"} />
+              <DetailRow label="Updated at" value={descriptor.updated_at ? new Date(descriptor.updated_at * 1000).toLocaleString() : "—"} />
+              <DetailRow label="Funding confirmation" value={descriptor.funding_rules?.required_confirmation || "—"} />
+              <DetailRow label="Release trigger" value={descriptor.release_rules?.release_trigger || "—"} />
+              <DetailRow label="Refund trigger" value={descriptor.release_rules?.refund_trigger || "—"} />
+              <DetailRow label="Dispute policy" value={descriptor.dispute_rules?.policy || "—"} />
+            </>
+          ) : null}
+
+          {service ? (
+            <>
+              <Typography variant="subtitle2" sx={{ fontWeight: 900, mt: 1 }}>Service</Typography>
+              <DetailRow label="Transport" value={service.transport?.join(", ") || "—"} />
+              <DetailRow label="Interface" value={service.interface || "—"} />
+              <DetailRow label="Endpoint" value={service.endpoint || "—"} mono />
+              <DetailRow label="Schema URL" value={service.schema_url || "—"} mono />
+              <DetailRow label="Auth" value={service.auth?.join(", ") || "—"} />
+              <DetailRow label="Operations" value={service.operations?.join(", ") || "—"} />
+              <DetailRow label="Funding models" value={service.funding_model?.join(", ") || "—"} />
+              <DetailRow label="Release decisions" value={service.release_decisions?.join(", ") || "—"} />
+              <DetailRow label="Enrollment" value={candidate?.enrollment || "—"} />
+            </>
+          ) : null}
+
+          {signers ? (
+            <>
+              <Typography variant="subtitle2" sx={{ fontWeight: 900, mt: 1 }}>Decision signers</Typography>
+              {signers.operator_pubkey ? <DetailRow label="Operator pubkey" value={signers.operator_pubkey} mono /> : null}
+              {signers.application_pubkeys?.length ? (
+                <DetailRow
+                  label="Application pubkeys"
+                  value={signers.application_pubkeys.map((pk) => `${shortKey(pk)}${pk === appSigner?.pubkey ? " (your signer)" : ""}`).join(", ")}
+                  mono
+                />
+              ) : null}
+              {signers.oracle_pubkeys?.length ? <DetailRow label="Oracle pubkeys" value={signers.oracle_pubkeys.map(shortKey).join(", ")} mono /> : null}
+              <Typography variant="caption" color={signerTrusted ? "success.main" : "warning.main"}>
+                {signerTrusted ? "This service trusts your application signer." : "This service does not trust your application signer."}
+              </Typography>
+            </>
+          ) : null}
+
+          {entry.source.type === "url" ? <DetailRow label="Descriptor source" value={entry.source.url} mono /> : <DetailRow label="Descriptor source" value={`Nostr event ${shortKey(entry.source.event.id)}`} mono />}
+
+          <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", mt: 1 }}>
+            <Button variant="text" onClick={onClose}>Close</Button>
+            {selectable && candidate ? (
+              <Button variant="contained" onClick={() => { onSelect(candidate); onClose(); }}>Select this escrow</Button>
+            ) : null}
+          </Stack>
+        </Stack>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 900, minWidth: 130, flexShrink: 0, textTransform: "uppercase" }}>{label}</Typography>
+      <Typography variant="body2" sx={{ overflowWrap: "anywhere", fontFamily: mono ? "monospace" : "inherit" }}>{value}</Typography>
+    </Stack>
   );
 }
 
