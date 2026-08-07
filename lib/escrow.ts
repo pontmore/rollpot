@@ -65,7 +65,11 @@ export type CreateEscrowResponse = {
   funding_model: string;
   funding_threshold?: number | null;
   participant_count?: number | null;
-  invitation_token: string;
+  funding_deadline?: string;
+  enrollments?: Array<{
+    participant_pubkey: string;
+    enrollment_token: string;
+  }>;
 };
 
 export type FundingInstructionsResponse = {
@@ -92,7 +96,7 @@ export type FundStatusResponse = {
 
 export type ReleaseEscrowResponse = {
   escrow_id: string;
-  state: "SETTLED";
+  state: "released";
   recipient: "creator" | "counterparty";
   payout_sats: number;
   payout: unknown;
@@ -131,7 +135,8 @@ export type GameInvite = {
   version: 1;
   game: "rollpot";
   escrow_id: string;
-  invitation_token: string;
+  enrollment_token: string;
+  counterparty_pubkey: string;
   amount_sats: number;
   funding_model: string;
   creator_player: PlayerProfile;

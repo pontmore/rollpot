@@ -24,6 +24,7 @@ import {
   Typography,
 } from "@mui/material";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { nip19 } from "nostr-tools";
 import { DiceFace } from "./dice-face";
 import { FundingStatusCard } from "./status-card";
 import {
@@ -61,6 +62,7 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
   const [busy, setBusy] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [amountSats, setAmountSats] = useState("100");
+  const [counterpartyPubkey, setCounterpartyPubkey] = useState("");
   const [fundingModel] = useState(initialFundingModel);
   const [playerIdentity, setPlayerIdentity] = useState<EscrowIdentity | null>(null);
   const [playerProfile, setPlayerProfile] = useState<PlayerProfile | null>(null);
@@ -109,10 +111,18 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
   const profileConfigured = Boolean(playerIdentity && playerProfile?.name.trim() && playerProfile.lightning_address.trim());
   const needsName = Boolean(playerIdentity && !playerProfile?.name.trim());
   const needsLightningAddress = Boolean(playerIdentity && !playerProfile?.lightning_address.trim());
-  const playerJoined = Boolean(escrow?.counterparty_pubkey || counterpartyPlayer);
+  const normalizedCounterpartyPubkey = normalizeNostrPubkey(counterpartyPubkey);
+  const counterpartyPubkeyError = counterpartyPubkey.trim() && !normalizedCounterpartyPubkey
+    ? "Enter a valid npub or 64-character hex public key."
+    : normalizedCounterpartyPubkey === playerIdentity?.pubkey
+      ? "Player 2 must use a different Nostr identity."
+      : "";
+  const playerJoined = Boolean(
+    escrow?.counterparty_pubkey || counterpartyPlayer || (creatorStatus?.total_funders ?? 0) >= 2,
+  );
   const creatorPaid = Boolean(creatorStatus?.funded || creatorStatus?.my_funded);
   const counterpartyPaid = Boolean(counterpartyStatus?.funded || counterpartyStatus?.my_funded);
-  const requiresCounterpartyBeforeFunding = fundingModel === "two_party" || fundingModel === "n_of_m";
+  const requiresCounterpartyBeforeFunding = fundingModel === "two_party" || fundingModel === "m_of_n";
   const canRequestPayment = Boolean(escrow && (!requiresCounterpartyBeforeFunding || playerJoined));
   const paymentsReady = fundingModel === "two_party" ? creatorPaid && counterpartyPaid : creatorPaid;
   const myFunding = localRole === "creator" ? creatorFunding : counterpartyFunding;
@@ -122,11 +132,18 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
       return "";
     }
 
+    const enrollment = escrow.enrollments?.[0];
+
+    if (!enrollment) {
+      return "";
+    }
+
     return encodeInvite({
       version: 1,
       game: "rollpot",
       escrow_id: escrow.escrow_id,
-      invitation_token: escrow.invitation_token,
+      enrollment_token: enrollment.enrollment_token,
+      counterparty_pubkey: enrollment.participant_pubkey,
       amount_sats: escrow.amount_sats,
       funding_model: escrow.funding_model,
       creator_player: creatorPlayer,
@@ -134,15 +151,56 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
     });
   }, [creatorPlayer, escrow, localRole, releaseResponse]);
 
+  useEffect(() => {
+    if (!escrow || !playerIdentity || localRole !== "creator" || playerJoined || releaseResponse) {
+      return;
+    }
+
+    let cancelled = false;
+    const syncParticipants = async () => {
+      try {
+        const status = await callEscrow<FundStatusResponse>(playerIdentity, "fund_status", {
+          escrow_id: escrow.escrow_id,
+        });
+
+        if (!cancelled) {
+          setCreatorStatus(status);
+        }
+      } catch {
+        // Manual status checks still surface service errors to the player.
+      }
+    };
+
+    void syncParticipants();
+    const interval = window.setInterval(syncParticipants, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [escrow, localRole, playerIdentity, playerJoined, releaseResponse]);
+
   async function createEscrow() {
     if (!playerIdentity || !playerProfile) return;
     assertPlayableProfile(playerProfile);
+    const participantPubkey = normalizeNostrPubkey(counterpartyPubkey);
+
+    if (!participantPubkey) {
+      setError("Enter Player 2's npub or 64-character hex Nostr public key.");
+      return;
+    }
+
+    if (participantPubkey === playerIdentity.pubkey) {
+      setError("Player 2 must use a different Nostr identity.");
+      return;
+    }
 
     await runOperation(async () => {
       const created = await callEscrow<CreateEscrowResponse>(playerIdentity, "create", {
         amount_sats: Number(amountSats),
         description: "Rollpot wager",
         refund_ln_address: playerProfile.lightning_address,
+        participant_pubkeys: [participantPubkey],
         funding_model: fundingModel,
         idempotency_key: crypto.randomUUID(),
       });
@@ -193,13 +251,14 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
 
     const invite = decodeInvite(inviteInput);
 
+    if (invite.counterparty_pubkey !== playerIdentity.pubkey) {
+      setError("This invite is bound to a different Nostr identity.");
+      return;
+    }
+
     await runOperation(async () => {
       const joined = await callEscrow<CreateEscrowResponse>(playerIdentity, "create", {
-        amount_sats: invite.amount_sats,
-        description: "Rollpot wager",
-        refund_ln_address: playerProfile.lightning_address,
-        idempotency_key: `rollpot-join:${invite.escrow_id}:${playerIdentity.pubkey}`,
-        invitation_token: invite.invitation_token,
+        enrollment_token: invite.enrollment_token,
       });
       const game = baseTrackedGame({
         escrow: joined,
@@ -306,6 +365,7 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
 
   function startNewGame() {
     setActiveGameId("");
+    setCounterpartyPubkey("");
     setEscrow(null);
     setLocalRole("creator");
     setCreatorPlayer(playerProfile);
@@ -327,6 +387,7 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
   function applyTrackedGame(game: TrackedDiceGame) {
     setActiveGameId(game.id);
     setAmountSats(String(game.amount_sats));
+    setCounterpartyPubkey("");
     setEscrow(game.escrow);
     setLocalRole(game.local_role);
     setCreatorPlayer(game.creator_player);
@@ -392,7 +453,11 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
     }
   }
 
-  async function callEscrow<T>(identity: EscrowIdentity, operation: string, payload: unknown): Promise<T> {
+  async function callEscrow<T>(
+    identity: EscrowIdentity,
+    operation: string,
+    payload: unknown,
+  ): Promise<T> {
     const upstreamUrl = `${endpoint}/${operation}`;
     const response = await fetch("/api/escrow", {
       method: "POST",
@@ -409,6 +474,22 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
     const body = await response.json();
 
     if (!response.ok) {
+      if (response.status >= 500) {
+        throw new Error(
+          `Escrow service error while processing ${operation} (HTTP ${response.status}). ` +
+            "The enrollment token may have been consumed by the service; do not retry the same invite until the escrow service is checked.",
+        );
+      }
+
+      if (
+        operation === "funding_instructions" &&
+        body?.error === "authenticated pubkey is not a registered funder for this escrow"
+      ) {
+        throw new Error(
+          "The escrow service did not register this participant as a funder. This escrow is incomplete and cannot be funded; create a new game after the service enrollment issue is fixed.",
+        );
+      }
+
       throw new Error(body?.error || JSON.stringify(body));
     }
 
@@ -510,7 +591,21 @@ export function RollpotClient({ descriptor }: { descriptor: EscrowDescriptor }) 
                         </Button>
                       </Stack>
                       <TextField label="Amount per player, sats" value={amountSats} onChange={(event) => setAmountSats(event.target.value)} size="small" type="number" />
-                      <Button disabled={!canCallService || busy} variant="contained" onClick={createEscrow} startIcon={<LocalAtmIcon />}>
+                      <TextField
+                        label="Player 2 Nostr pubkey"
+                        value={counterpartyPubkey}
+                        onChange={(event) => setCounterpartyPubkey(event.target.value)}
+                        size="small"
+                        placeholder="npub1... or 64-character hex"
+                        error={Boolean(counterpartyPubkeyError)}
+                        helperText={counterpartyPubkeyError || "The invite will be bound to this identity."}
+                      />
+                      <Button
+                        disabled={!canCallService || !normalizedCounterpartyPubkey || Boolean(counterpartyPubkeyError) || busy}
+                        variant="contained"
+                        onClick={createEscrow}
+                        startIcon={<LocalAtmIcon />}
+                      >
                         Create game
                       </Button>
                       <TextField label="Invite code" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} size="small" multiline minRows={3} />
@@ -754,11 +849,36 @@ function decodeInvite(value: string): GameInvite {
   const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
   const invite = JSON.parse(atob(padded)) as GameInvite;
 
-  if (invite.version !== 1 || invite.game !== "rollpot" || !invite.invitation_token || !invite.creator_player?.lightning_address) {
+  if (
+    invite.version !== 1 ||
+    invite.game !== "rollpot" ||
+    !invite.enrollment_token ||
+    !/^[0-9a-f]{64}$/.test(invite.counterparty_pubkey) ||
+    !invite.creator_player?.lightning_address
+  ) {
     throw new Error("Invite code is not a valid Rollpot invite.");
   }
 
   return invite;
+}
+
+function normalizeNostrPubkey(value: string): string | null {
+  const trimmed = value.trim().toLowerCase();
+
+  if (/^[0-9a-f]{64}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (!trimmed.startsWith("npub1")) {
+    return null;
+  }
+
+  try {
+    const decoded = nip19.decode(trimmed);
+    return decoded.type === "npub" && typeof decoded.data === "string" ? decoded.data : null;
+  } catch {
+    return null;
+  }
 }
 
 function assertPlayableProfile(profile: PlayerProfile) {
