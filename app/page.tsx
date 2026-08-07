@@ -1,12 +1,13 @@
 import { Alert, Box, Button, Container, Link, Stack, Typography } from "@mui/material";
 import { RollpotClient } from "../components/rollpot-client";
-import { DESCRIPTOR_URL, fetchDescriptor } from "../lib/escrow";
+import { DESCRIPTOR_URL } from "../lib/escrow";
+import { discoverEscrowService } from "../lib/escrow-server";
 
 export default async function Home() {
   try {
-    const descriptor = await fetchDescriptor();
+    const service = await discoverEscrowService(DESCRIPTOR_URL);
 
-    return <RollpotClient descriptor={descriptor} />;
+    return <RollpotClient initialService={service} />;
   } catch (error) {
     return (
       <Box component="main" sx={{ minHeight: "100vh", py: 8 }}>

@@ -1,5 +1,11 @@
 export const DESCRIPTOR_URL = "https://standalone-escrow.onrender.com/pontmore/v1/descriptor";
 
+export const REQUIRED_OPERATIONS = ["create", "funding_instructions", "fund_status", "release", "refund", "cancel"] as const;
+
+export type EscrowDescriptorSource =
+  | { type: "url"; url: string }
+  | { type: "nostr"; event: NostrEvent };
+
 export type EscrowDescriptor = {
   version: number;
   escrow_type: string;
@@ -15,6 +21,7 @@ export type EscrowDescriptor = {
     policy: string;
   };
   reference_format: string;
+  updated_at: number;
   service?: {
     transport?: string[];
     interface?: string;
@@ -27,7 +34,22 @@ export type EscrowDescriptor = {
     participant_count?: number;
     release_decisions?: string[];
     default_funding_model?: string;
+    decision_signers?: {
+      operator_pubkey?: string;
+      application_pubkeys?: string[];
+      oracle_pubkeys?: string[];
+    };
   };
+};
+
+export type EscrowService = {
+  source: EscrowDescriptorSource;
+  service_id: string;
+  descriptor: EscrowDescriptor;
+  endpoint: string;
+  schema_url: string;
+  operation_urls: Record<(typeof REQUIRED_OPERATIONS)[number], string>;
+  enrollment: "open_token" | "predeclared_pubkey";
 };
 
 export type EscrowIdentity = {
@@ -67,7 +89,7 @@ export type CreateEscrowResponse = {
   participant_count?: number | null;
   funding_deadline?: string;
   enrollments?: Array<{
-    participant_pubkey: string;
+    participant_pubkey?: string;
     enrollment_token: string;
   }>;
 };
@@ -129,6 +151,7 @@ export type TrackedDiceGame = {
   counterparty_status: FundStatusResponse | null;
   result: DiceGameResult | null;
   release: ReleaseEscrowResponse | null;
+  service: EscrowService;
 };
 
 export type GameInvite = {
@@ -136,25 +159,21 @@ export type GameInvite = {
   game: "rollpot";
   escrow_id: string;
   enrollment_token: string;
-  counterparty_pubkey: string;
+  counterparty_pubkey?: string;
   amount_sats: number;
   funding_model: string;
   creator_player: PlayerProfile;
   created_at: string;
+  service_source: EscrowDescriptorSource;
 };
 
-export async function fetchDescriptor(): Promise<EscrowDescriptor> {
-  const response = await fetch(DESCRIPTOR_URL, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Descriptor fetch failed with ${response.status}.`);
-  }
-
-  return (await response.json()) as EscrowDescriptor;
-}
-
-export function getServiceEndpoint(descriptor: EscrowDescriptor) {
-  return descriptor.service?.endpoint?.replace(/\/$/, "") || "";
-}
+export type EscrowCatalogEntry = {
+  service?: EscrowService;
+  descriptor?: Partial<EscrowDescriptor>;
+  source: EscrowDescriptorSource;
+  publisher_pubkey: string;
+  identifier: string;
+  compatible: boolean;
+  compatibility_status: "discovery_only" | "standalone_compatible" | "standalone_incompatible";
+  compatibility_reason?: string;
+};
