@@ -611,85 +611,110 @@ export function RollpotClient() {
           {!serviceSelected ? <Alert severity="info">Select an escrow before creating a game.</Alert> : null}
 
           <Paper elevation={0} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2, p: 2 }}>
-            <Stack spacing={1.5} sx={{ mb: 2 }}>
-              <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
-                <Box>
-                  <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>Available escrows</Typography>
-                  <Typography variant="body2" color="text.secondary">Query PIP-01 descriptors from public Nostr relays, then select one for a new game.</Typography>
+            {serviceSelected && !catalogExpanded && service ? (
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
+                <Box sx={{ minWidth: 0 }}>
+                  <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                    <Chip size="small" label="selected" color="primary" />
+                    <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
+                      {service.source.type === "nostr"
+                        ? service.source.event.tags.find(([name]) => name === "d")?.[1] || "Nostr escrow"
+                        : "Direct URL escrow"}
+                    </Typography>
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary">
+                    {service.descriptor.escrow_type} · {service.descriptor.networks.join(", ")} · {service.descriptor.service?.interface}
+                  </Typography>
                 </Box>
-                <Stack direction="row" spacing={1}>
-                  {catalog.length > 0 && !catalogExpanded ? (
-                    <Button size="small" variant="text" onClick={() => setCatalogExpanded(true)}>
-                      Change escrow
+                <Button size="small" variant="outlined" onClick={() => setCatalogExpanded(true)}>
+                  Change escrow
+                </Button>
+              </Stack>
+            ) : (
+              <Stack spacing={1.5} sx={{ mb: 2 }}>
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
+                  <Box>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>Available escrows</Typography>
+                    <Typography variant="body2" color="text.secondary">Query PIP-01 descriptors from public Nostr relays, then select one for a new game.</Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1}>
+                    {serviceSelected ? (
+                      <Button size="small" variant="text" onClick={() => setCatalogExpanded(false)}>
+                        Collapse
+                      </Button>
+                    ) : null}
+                    <Button size="small" variant="contained" onClick={() => void loadEscrowCatalog()} disabled={catalogBusy}>
+                      {catalogBusy ? "Discovering..." : "Discover escrows"}
                     </Button>
-                  ) : null}
-                  <Button size="small" variant="contained" onClick={() => void loadEscrowCatalog()} disabled={catalogBusy}>
-                    {catalogBusy ? "Discovering..." : "Discover escrows"}
+                  </Stack>
+                </Stack>
+                {catalogExpanded ? (
+                  <Stack spacing={1}>
+                    {catalog.map((entry) => {
+                    const candidate = entry.service;
+                    const signerTrusted = candidate ? isApplicationSignerTrusted(candidate, appSigner?.pubkey) : false;
+                    const selectable = entry.compatible && Boolean(candidate) && signerTrusted;
+                    const selected = Boolean(candidate && serviceSelected && service && candidate.service_id === service.service_id);
+                    const reason = entry.compatibility_status === "discovery_only"
+                      ? entry.compatibility_reason
+                      : !entry.compatible
+                      ? entry.compatibility_reason
+                      : !signerTrusted
+                        ? "This service does not trust the active Rollpot application signer."
+                        : "Compatible with Rollpot";
+                    const descriptor = entry.descriptor || candidate?.descriptor;
+                    const statusLabel = entry.compatibility_status === "discovery_only"
+                      ? "Discovery only"
+                      : selectable
+                        ? "Standalone compatible"
+                        : "Standalone incompatible";
+                    const statusColor = entry.compatibility_status === "discovery_only" ? "info" : selectable ? "success" : "warning";
+
+                      return (
+                        <Paper key={`${entry.publisher_pubkey}:${entry.identifier}:${entry.source.type}`} variant="outlined" sx={{ p: 1.5 }}>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
+                          <Box sx={{ minWidth: 0, cursor: "pointer" }} onClick={() => setDetailEntry(entry)}>
+                            <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                              <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>{entry.identifier}</Typography>
+                              <Chip size="small" label={statusLabel} color={statusColor} />
+                              {selected ? <Chip size="small" label="selected" color="primary" /> : null}
+                              <Chip size="small" icon={<InfoOutlinedIcon />} label="Details" variant="outlined" onClick={() => setDetailEntry(entry)} />
+                            </Stack>
+                            <Typography variant="body2" color="text.secondary">
+                              {descriptor?.escrow_type || "Unknown escrow type"} · {descriptor?.networks?.join(", ") || "network not declared"}
+                            </Typography>
+                            {entry.publisher_pubkey ? <Typography variant="caption" color="text.secondary">Publisher {shortKey(entry.publisher_pubkey)}</Typography> : null}
+                            <Typography variant="caption" color={selectable ? "success.main" : "warning.main"} sx={{ display: "block" }}>{reason}</Typography>
+                          </Box>
+                          <Button disabled={!selectable || selected} variant={selected ? "contained" : "outlined"} onClick={() => candidate && selectService(candidate)}>
+                            {selected ? "Selected" : "Select"}
+                          </Button>
+                        </Stack>
+                        </Paper>
+                      );
+                    })}
+                  </Stack>
+                ) : null}
+              </Stack>
+            )}
+            {(!serviceSelected || catalogExpanded) ? (
+              <>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>Direct URL fallback</Typography>
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ alignItems: { md: "flex-start" } }}>
+                  <TextField
+                    label="Escrow descriptor URL"
+                    value={descriptorInput}
+                    onChange={(event) => setDescriptorInput(event.target.value)}
+                    size="small"
+                    fullWidth
+                    helperText={service ? `${service.descriptor.escrow_type} · ${service.descriptor.networks.join(", ")} · ${service.descriptor.service?.interface}` : "No escrow selected yet"}
+                  />
+                  <Button disabled={discoveryBusy || !descriptorInput.trim()} variant="outlined" onClick={selectDescriptor} sx={{ minWidth: 120 }}>
+                    Validate URL
                   </Button>
                 </Stack>
-              </Stack>
-              {catalogExpanded ? (
-                <Stack spacing={1}>
-                  {catalog.map((entry) => {
-                  const candidate = entry.service;
-                  const signerTrusted = candidate ? isApplicationSignerTrusted(candidate, appSigner?.pubkey) : false;
-                  const selectable = entry.compatible && Boolean(candidate) && signerTrusted;
-                  const selected = Boolean(candidate && serviceSelected && service && candidate.service_id === service.service_id);
-                  const reason = entry.compatibility_status === "discovery_only"
-                    ? entry.compatibility_reason
-                    : !entry.compatible
-                    ? entry.compatibility_reason
-                    : !signerTrusted
-                      ? "This service does not trust the active Rollpot application signer."
-                      : "Compatible with Rollpot";
-                  const descriptor = entry.descriptor || candidate?.descriptor;
-                  const statusLabel = entry.compatibility_status === "discovery_only"
-                    ? "Discovery only"
-                    : selectable
-                      ? "Standalone compatible"
-                      : "Standalone incompatible";
-                  const statusColor = entry.compatibility_status === "discovery_only" ? "info" : selectable ? "success" : "warning";
-
-                    return (
-                      <Paper key={`${entry.publisher_pubkey}:${entry.identifier}:${entry.source.type}`} variant="outlined" sx={{ p: 1.5 }}>
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
-                        <Box sx={{ minWidth: 0, cursor: "pointer" }} onClick={() => setDetailEntry(entry)}>
-                          <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
-                            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>{entry.identifier}</Typography>
-                            <Chip size="small" label={statusLabel} color={statusColor} />
-                            {selected ? <Chip size="small" label="selected" color="primary" /> : null}
-                            <Chip size="small" icon={<InfoOutlinedIcon />} label="Details" variant="outlined" onClick={() => setDetailEntry(entry)} />
-                          </Stack>
-                          <Typography variant="body2" color="text.secondary">
-                            {descriptor?.escrow_type || "Unknown escrow type"} · {descriptor?.networks?.join(", ") || "network not declared"}
-                          </Typography>
-                          {entry.publisher_pubkey ? <Typography variant="caption" color="text.secondary">Publisher {shortKey(entry.publisher_pubkey)}</Typography> : null}
-                          <Typography variant="caption" color={selectable ? "success.main" : "warning.main"} sx={{ display: "block" }}>{reason}</Typography>
-                        </Box>
-                        <Button disabled={!selectable || selected} variant={selected ? "contained" : "outlined"} onClick={() => candidate && selectService(candidate)}>
-                          {selected ? "Selected" : "Select"}
-                        </Button>
-                      </Stack>
-                      </Paper>
-                    );
-                  })}
-                </Stack>
-              ) : null}
-            </Stack>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>Direct URL fallback</Typography>
-            <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ alignItems: { md: "flex-start" } }}>
-              <TextField
-                label="Escrow descriptor URL"
-                value={descriptorInput}
-                onChange={(event) => setDescriptorInput(event.target.value)}
-                size="small"
-                fullWidth
-                helperText={service ? `${service.descriptor.escrow_type} · ${service.descriptor.networks.join(", ")} · ${service.descriptor.service?.interface}` : "No escrow selected yet"}
-              />
-              <Button disabled={discoveryBusy || !descriptorInput.trim()} variant="outlined" onClick={selectDescriptor} sx={{ minWidth: 120 }}>
-                Validate URL
-              </Button>
-            </Stack>
+              </>
+            ) : null}
           </Paper>
 
           <Stack direction={{ xs: "column", md: "row" }} spacing={2.5} sx={{ alignItems: "flex-start" }}>
