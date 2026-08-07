@@ -58,26 +58,16 @@ import {
 const APP_SECRET_STORAGE = "pontmore-rollpot-app-secret";
 const GAMES_STORAGE = "pontmore-dice-games";
 
-export function RollpotClient({ initialService }: { initialService: EscrowService }) {
+export function RollpotClient() {
   const [busy, setBusy] = useState(false);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [amountSats, setAmountSats] = useState("100");
   const [counterpartyPubkey, setCounterpartyPubkey] = useState("");
-  const [service, setService] = useState(initialService);
+  const [service, setService] = useState<EscrowService | null>(null);
   const [serviceSelected, setServiceSelected] = useState(false);
-  const [descriptorInput, setDescriptorInput] = useState(initialService.source.type === "url" ? initialService.source.url : "");
-  const [catalog, setCatalog] = useState<EscrowCatalogEntry[]>([
-    {
-      service: initialService,
-      descriptor: initialService.descriptor,
-      source: initialService.source,
-      publisher_pubkey: "",
-      identifier: "Default HTTPS escrow",
-      compatible: true,
-      compatibility_status: "standalone_compatible",
-    },
-  ]);
+  const [descriptorInput, setDescriptorInput] = useState("");
+  const [catalog, setCatalog] = useState<EscrowCatalogEntry[]>([]);
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [catalogExpanded, setCatalogExpanded] = useState(false);
   const [detailEntry, setDetailEntry] = useState<EscrowCatalogEntry | null>(null);
@@ -125,14 +115,14 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
   }, [playerProfile]);
 
   const fundingModel = escrow?.funding_model || "two_party";
-  const trustedApplicationPubkeys = service.descriptor.service?.decision_signers?.application_pubkeys;
+  const trustedApplicationPubkeys = service?.descriptor.service?.decision_signers?.application_pubkeys;
   const appSignerTrusted = !trustedApplicationPubkeys?.length || Boolean(appSigner && trustedApplicationPubkeys.includes(appSigner.pubkey));
   const canAuthenticate = Boolean(playerIdentity && playerProfile?.lightning_address && appSigner);
-  const canCallService = Boolean(serviceSelected && service.endpoint && canAuthenticate && appSignerTrusted);
+  const canCallService = Boolean(serviceSelected && service?.endpoint && canAuthenticate && appSignerTrusted);
   const profileConfigured = Boolean(playerIdentity && playerProfile?.name.trim() && playerProfile.lightning_address.trim());
   const needsName = Boolean(playerIdentity && !playerProfile?.name.trim());
   const needsLightningAddress = Boolean(playerIdentity && !playerProfile?.lightning_address.trim());
-  const requiresCounterpartyPubkey = service.enrollment === "predeclared_pubkey";
+  const requiresCounterpartyPubkey = service?.enrollment === "predeclared_pubkey";
   const normalizedCounterpartyPubkey = normalizeNostrPubkey(counterpartyPubkey);
   const counterpartyPubkeyError = counterpartyPubkey.trim() && !normalizedCounterpartyPubkey
     ? "Enter a valid npub or 64-character hex public key."
@@ -150,7 +140,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
   const myFunding = localRole === "creator" ? creatorFunding : counterpartyFunding;
   const myStatus = localRole === "creator" ? creatorStatus : counterpartyStatus;
   const inviteCode = useMemo(() => {
-    if (!escrow || localRole !== "creator" || !creatorPlayer || releaseResponse) {
+    if (!escrow || localRole !== "creator" || !creatorPlayer || !service || releaseResponse) {
       return "";
     }
 
@@ -172,7 +162,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
       created_at: new Date().toISOString(),
       service_source: service.source,
     });
-  }, [creatorPlayer, escrow, localRole, releaseResponse, service.source]);
+  }, [creatorPlayer, escrow, localRole, releaseResponse, service?.source]);
 
   useEffect(() => {
     if (!escrow || !playerIdentity || localRole !== "creator" || playerJoined || releaseResponse) {
@@ -229,7 +219,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
       });
       const game = baseTrackedGame({
         escrow: created,
-        service,
+        service: service!,
         role: "creator",
         creator: playerProfile,
         counterparty: null,
@@ -439,7 +429,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
   }
 
   function saveCurrentGame(overrides: Partial<TrackedDiceGame>) {
-    if (!escrow || !creatorPlayer) return;
+    if (!escrow || !creatorPlayer || !service) return;
 
     const now = new Date().toISOString();
     const gameId = getGameId(service.service_id, escrow.escrow_id);
@@ -497,8 +487,9 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
     identity: EscrowIdentity,
     operation: string,
     payload: unknown,
-    targetService = service,
+    targetService: EscrowService | null = service,
   ): Promise<T> {
+    if (!targetService) throw new Error("No escrow service selected.");
     const validatedService = await discoverService(targetService.source);
     const upstreamUrl = validatedService.operation_urls[operation as keyof typeof validatedService.operation_urls];
     if (!upstreamUrl) throw new Error(`Escrow service does not support ${operation}.`);
@@ -567,8 +558,12 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
       if (!response.ok) throw new Error(body?.error || "Escrow catalog discovery failed.");
       const relayEntries = body.escrows as EscrowCatalogEntry[];
       setCatalog((current) => {
-        const directEntries = current.filter((entry) => entry.source.type === "url");
-        return [...directEntries, ...relayEntries];
+        const unique = [...current, ...relayEntries];
+        return unique.filter((entry, index) =>
+          unique.findIndex((candidate) =>
+            `${candidate.publisher_pubkey}:${candidate.identifier}` === `${entry.publisher_pubkey}:${entry.identifier}`,
+          ) === index,
+        );
       });
       setCatalogExpanded(true);
     } catch (nextError) {
@@ -608,7 +603,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
 
           {busy ? <LinearProgress /> : null}
           {error ? <Alert severity="error">{error}</Alert> : null}
-          {!appSignerTrusted ? (
+          {serviceSelected && !appSignerTrusted ? (
             <Alert severity="error">
               This escrow does not trust this Rollpot application signer. Creating a game would leave Rollpot unable to release the wager.
             </Alert>
@@ -639,7 +634,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
                   const candidate = entry.service;
                   const signerTrusted = candidate ? isApplicationSignerTrusted(candidate, appSigner?.pubkey) : false;
                   const selectable = entry.compatible && Boolean(candidate) && signerTrusted;
-                  const selected = Boolean(candidate && serviceSelected && candidate.service_id === service.service_id);
+                  const selected = Boolean(candidate && serviceSelected && service && candidate.service_id === service.service_id);
                   const reason = entry.compatibility_status === "discovery_only"
                     ? entry.compatibility_reason
                     : !entry.compatible
@@ -689,7 +684,7 @@ export function RollpotClient({ initialService }: { initialService: EscrowServic
                 onChange={(event) => setDescriptorInput(event.target.value)}
                 size="small"
                 fullWidth
-                helperText={`${service.descriptor.escrow_type} · ${service.descriptor.networks.join(", ")} · ${service.descriptor.service?.interface}`}
+                helperText={service ? `${service.descriptor.escrow_type} · ${service.descriptor.networks.join(", ")} · ${service.descriptor.service?.interface}` : "No escrow selected yet"}
               />
               <Button disabled={discoveryBusy || !descriptorInput.trim()} variant="outlined" onClick={selectDescriptor} sx={{ minWidth: 120 }}>
                 Validate URL
