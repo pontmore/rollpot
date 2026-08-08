@@ -545,8 +545,9 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
     if (!response.ok) {
       if (response.status >= 500) {
         throw new Error(
-          `Escrow service error while processing ${operation} (HTTP ${response.status}). ` +
-            "The enrollment token may have been consumed by the service; do not retry the same invite until the escrow service is checked.",
+          `Escrow service error (HTTP ${response.status}) during ${operation}. ` +
+            "The escrow operator may be restarting (Render free tier cold start). " +
+            "Wait a few seconds, then try again.",
         );
       }
 
