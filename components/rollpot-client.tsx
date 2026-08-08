@@ -590,7 +590,8 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
         const unique = [...current, ...relayEntries];
         return unique.filter((entry, index) =>
           unique.findIndex((candidate) =>
-            `${candidate.publisher_pubkey}:${candidate.identifier}` === `${entry.publisher_pubkey}:${entry.identifier}`,
+            (candidate.service?.endpoint || `${candidate.publisher_pubkey}:${candidate.identifier}`) ===
+            (entry.service?.endpoint || `${entry.publisher_pubkey}:${entry.identifier}`),
           ) === index,
         );
       });
