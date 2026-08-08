@@ -1201,6 +1201,8 @@ function isGameExpired(game: TrackedDiceGame) {
 
   if (counterpartyJoined && creatorFunded && counterpartyFunded) return false;
 
+  if (!counterpartyJoined) return true;
+
   const now = Date.now();
   const deadline = game.escrow.funding_deadline ? Date.parse(game.escrow.funding_deadline) : 0;
   const created = Date.parse(game.created_at);
