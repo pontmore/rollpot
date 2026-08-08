@@ -133,7 +133,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   const trustedApplicationPubkeys = service?.descriptor.service?.decision_signers?.application_pubkeys;
   const appSignerTrusted = !trustedApplicationPubkeys?.length || Boolean(appSigner && trustedApplicationPubkeys.includes(appSigner.pubkey));
   const canAuthenticate = Boolean(playerIdentity && playerProfile?.lightning_address && appSigner);
-  const canCallService = Boolean(serviceSelected && service?.endpoint && canAuthenticate && appSignerTrusted);
+  const canCallService = Boolean(serviceSelected && service?.endpoint && canAuthenticate && appSignerTrusted && !escrow);
   const profileConfigured = Boolean(playerIdentity && playerProfile?.name.trim() && playerProfile.lightning_address.trim());
   const needsName = Boolean(playerIdentity && !playerProfile?.name.trim());
   const needsLightningAddress = Boolean(playerIdentity && !playerProfile?.lightning_address.trim());
@@ -211,6 +211,9 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   async function createEscrow() {
     if (!playerIdentity || !playerProfile) return;
     assertPlayableProfile(playerProfile);
+
+    startNewGame();
+
     const participantPubkey = normalizeNostrPubkey(counterpartyPubkey);
 
     if (requiresCounterpartyPubkey && !participantPubkey) {
