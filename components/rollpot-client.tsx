@@ -58,16 +58,30 @@ import {
 const APP_SECRET_STORAGE = "pontmore-rollpot-app-secret";
 const GAMES_STORAGE = "pontmore-dice-games";
 
-export function RollpotClient() {
+export function RollpotClient({ initialService }: { initialService?: EscrowService | null }) {
   const [busy, setBusy] = useState(false);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [amountSats, setAmountSats] = useState("100");
   const [counterpartyPubkey, setCounterpartyPubkey] = useState("");
-  const [service, setService] = useState<EscrowService | null>(null);
-  const [serviceSelected, setServiceSelected] = useState(false);
-  const [descriptorInput, setDescriptorInput] = useState("");
-  const [catalog, setCatalog] = useState<EscrowCatalogEntry[]>([]);
+  const [service, setService] = useState<EscrowService | null>(initialService ?? null);
+  const [serviceSelected, setServiceSelected] = useState(Boolean(initialService));
+  const [descriptorInput, setDescriptorInput] = useState(initialService?.source.type === "url" ? initialService.source.url : "");
+  const [catalog, setCatalog] = useState<EscrowCatalogEntry[]>(
+    initialService
+      ? [
+          {
+            service: initialService,
+            descriptor: initialService.descriptor,
+            source: initialService.source,
+            publisher_pubkey: "",
+            identifier: "Default HTTPS escrow",
+            compatible: true,
+            compatibility_status: "standalone_compatible",
+          },
+        ]
+      : [],
+  );
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [catalogExpanded, setCatalogExpanded] = useState(false);
   const [detailEntry, setDetailEntry] = useState<EscrowCatalogEntry | null>(null);
