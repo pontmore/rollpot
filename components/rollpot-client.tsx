@@ -3,6 +3,7 @@
 import AddIcon from "@mui/icons-material/Add";
 import CasinoIcon from "@mui/icons-material/Casino";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DeleteIcon from "@mui/icons-material/Delete";
 import HistoryIcon from "@mui/icons-material/History";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import LocalAtmIcon from "@mui/icons-material/LocalAtm";
@@ -484,6 +485,17 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
     });
   }
 
+  function deleteTrackedGame(gameId: string) {
+    setTrackedGames((current) => {
+      const nextGames = current.filter((entry) => entry.id !== gameId);
+      window.localStorage.setItem(GAMES_STORAGE, JSON.stringify(nextGames));
+      return nextGames;
+    });
+    if (activeGameId === gameId) {
+      startNewGame();
+    }
+  }
+
   async function runOperation(operation: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -834,24 +846,41 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                               Saved games
                             </Typography>
                           </Stack>
-                          {trackedGames.slice(0, 4).map((game) => (
-                            <Button
-                              key={game.id}
-                              variant={game.id === activeGameId ? "contained" : "outlined"}
-                              color={game.release ? "success" : "primary"}
-                              onClick={() => void restoreTrackedGame(game)}
-                              sx={{ justifyContent: "flex-start", textAlign: "left" }}
-                            >
-                              <Stack spacing={0.25} sx={{ alignItems: "flex-start", width: "100%" }}>
-                                <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
-                                  {game.release ? winnerLabel(game.release.recipient, game) : `${game.amount_sats} sats per player`}
-                                </Typography>
-                                <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                                  {game.release ? "Settled" : gameStatusLabel(game)} · {formatGameTime(game.updated_at)}
-                                </Typography>
+                          {trackedGames.slice(0, 4).map((game) => {
+                            const expired = isGameExpired(game);
+                            return (
+                              <Stack key={game.id} direction="row" spacing={0.5} sx={{ alignItems: "stretch" }}>
+                                <Button
+                                  variant={game.id === activeGameId ? "contained" : "outlined"}
+                                  color={game.release ? "success" : "primary"}
+                                  onClick={() => void restoreTrackedGame(game)}
+                                  sx={{ justifyContent: "flex-start", textAlign: "left", flex: 1 }}
+                                >
+                                  <Stack spacing={0.25} sx={{ alignItems: "flex-start", width: "100%" }}>
+                                    <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
+                                      {game.release ? winnerLabel(game.release.recipient, game) : `${game.amount_sats} sats per player`}
+                                    </Typography>
+                                    <Typography variant="caption" sx={{ opacity: 0.8 }}>
+                                      {game.release ? "Settled" : gameStatusLabel(game)} · {formatGameTime(game.updated_at)}
+                                    </Typography>
+                                  </Stack>
+                                </Button>
+                                {expired ? (
+                                  <Tooltip title="Delete expired game">
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      color="error"
+                                      onClick={() => deleteTrackedGame(game.id)}
+                                      sx={{ minWidth: 36, px: 1 }}
+                                    >
+                                      <DeleteIcon fontSize="small" />
+                                    </Button>
+                                  </Tooltip>
+                                ) : null}
                               </Stack>
-                            </Button>
-                          ))}
+                            );
+                          })}
                         </Stack>
                       ) : null}
                     </Stack>
@@ -1161,6 +1190,25 @@ function loadTrackedGames(): TrackedDiceGame[] {
   } catch {
     return [];
   }
+}
+
+function isGameExpired(game: TrackedDiceGame) {
+  if (game.release) return false;
+
+  const counterpartyJoined = Boolean(game.counterparty_player || game.escrow.counterparty_pubkey);
+  const creatorFunded = Boolean(game.creator_status?.funded || game.creator_status?.my_funded);
+  const counterpartyFunded = Boolean(game.counterparty_status?.funded || game.counterparty_status?.my_funded);
+
+  if (counterpartyJoined && creatorFunded && counterpartyFunded) return false;
+
+  const now = Date.now();
+  const deadline = game.escrow.funding_deadline ? Date.parse(game.escrow.funding_deadline) : 0;
+  const created = Date.parse(game.created_at);
+  const defaultTimeoutMs = 24 * 60 * 60 * 1000;
+
+  if (deadline && deadline > 0) return now > deadline;
+  if (created && created > 0) return now > created + defaultTimeoutMs;
+  return false;
 }
 
 function encodeInvite(invite: GameInvite) {
