@@ -232,7 +232,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
         description: "Rollpot wager",
         refund_ln_address: playerProfile.lightning_address,
         ...(requiresCounterpartyPubkey ? { participant_pubkeys: [participantPubkey] } : {}),
-        funding_model: fundingModel,
+        funding_model: "two_party",
         idempotency_key: crypto.randomUUID(),
       });
       const game = baseTrackedGame({
