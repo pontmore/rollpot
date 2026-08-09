@@ -288,6 +288,11 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
       return;
     }
 
+    if (invite.creator_player.pubkey === playerIdentity.pubkey) {
+      setError("You cannot join your own game. Use a different Nostr identity than the creator.");
+      return;
+    }
+
     await runOperation(async () => {
       const inviteService = await discoverService(invite.service_source);
       const joined = await callEscrow<CreateEscrowResponse>(playerIdentity, "create", {
