@@ -92,6 +92,41 @@ export function savePlayerProfile(profile: PlayerProfile) {
   window.localStorage.setItem(PLAYER_PROFILE_STORAGE, JSON.stringify(profile));
 }
 
+export async function loadNostrProfile(pubkey: string): Promise<Record<string, unknown> | null> {
+  const response = await fetch(`/api/nostr/profile?pubkey=${encodeURIComponent(pubkey)}`, { cache: "no-store" });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "Could not load Nostr profile.");
+  return body.metadata;
+}
+
+export async function publishPlayerProfile(identity: EscrowIdentity, profile: PlayerProfile) {
+  if (profile.pubkey !== identity.pubkey || !profile.name.trim() || !profile.lightning_address.trim()) {
+    throw new Error("Complete your player profile before publishing it to Nostr.");
+  }
+
+  const metadata = await loadNostrProfile(identity.pubkey);
+  const unsigned = {
+    kind: 0,
+    pubkey: identity.pubkey,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [] as string[][],
+    content: JSON.stringify({ ...metadata, name: profile.name.trim(), lud16: profile.lightning_address.trim() }),
+  };
+  const event = identity.signEvent
+    ? await identity.signEvent(unsigned)
+    : finalizeEvent(unsigned, identity.secretKey!);
+  if (event.pubkey !== identity.pubkey) throw new Error("The signer returned a different Nostr identity.");
+
+  const response = await fetch("/api/nostr/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event }),
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "Could not publish Nostr profile.");
+  return body as { event_id: string; published: string[] };
+}
+
 export async function buildNip98Authorization(identity: EscrowIdentity, method: string, url: string) {
   const unsigned = {
     kind: 27235,

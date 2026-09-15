@@ -107,6 +107,21 @@ export type FundStatusResponse = {
   counterparty_pubkey?: string | null;
 };
 
+export function hasReachedFundingThreshold(status: FundStatusResponse | null) {
+  if (!status || status.state !== "active") return false;
+  if (status.funded_count == null) return true;
+  return status.funded_count >= (status.funding_threshold ?? (status.funding_model === "2_of_2" ? 2 : 1));
+}
+
+export function isEscrowTerminal(status: FundStatusResponse | null) {
+  return status?.state === "released" || status?.state === "refunded" || status?.state === "canceled";
+}
+
+export function isOwnPaymentConfirmed(status: FundStatusResponse | null) {
+  if (!status) return false;
+  return status.my_funded == null ? status.funded : status.my_funded;
+}
+
 export type ReleaseEscrowResponse = {
   escrow_id: string;
   state: "released";
@@ -143,6 +158,7 @@ export type TrackedDiceGame = {
   result: DiceGameResult | null;
   release: ReleaseEscrowResponse | null;
   service: EscrowService;
+  invite_funding_deadline?: string;
 };
 
 export type GameInvite = {
@@ -155,6 +171,7 @@ export type GameInvite = {
   funding_model: string;
   creator_player: PlayerProfile;
   created_at: string;
+  funding_deadline?: string;
   service_source: EscrowDescriptorSource;
 };
 

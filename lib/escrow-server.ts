@@ -1,7 +1,7 @@
 import "server-only";
 
 import { isIP } from "node:net";
-import { resolve4, resolve6 } from "node:dns/promises";
+import { lookup } from "node:dns/promises";
 import {
   REQUIRED_OPERATIONS,
   type EscrowDescriptorSource,
@@ -207,9 +207,11 @@ async function validatePublicHttpsUrl(value: string, label: string): Promise<str
     throw new Error(`${label} must use a public host.`);
   }
 
+  // Node fetch uses the system resolver. Check that same set of addresses,
+  // avoiding a separate AAAA query that can stall for several seconds.
   const addresses = isIP(hostname)
     ? [hostname]
-    : [...await resolve4(hostname).catch(() => []), ...await resolve6(hostname).catch(() => [])];
+    : (await lookup(hostname, { all: true }).catch(() => [])).map(({ address }) => address);
   if (addresses.length === 0 || addresses.some(isDisallowedAddress)) {
     throw new Error(`${label} resolves to a disallowed network address.`);
   }

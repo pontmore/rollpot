@@ -1,6 +1,5 @@
 "use client";
 
-import AddIcon from "@mui/icons-material/Add";
 import CasinoIcon from "@mui/icons-material/Casino";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -25,20 +24,26 @@ import {
   Paper,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { nip19 } from "nostr-tools";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { DiceFace } from "./dice-face";
-import { FundingStatusCard } from "./status-card";
+import { FundingStatusCard, KeyValue } from "./status-card";
 import {
   buildApplicationReleaseDecision,
   buildNip98Authorization,
   connectNostrPlayer,
   createLocalNostrPlayer,
   loadCurrentPlayer,
+  loadNostrProfile,
   loadOrCreateIdentity,
+  publishPlayerProfile,
   rollDie,
   savePlayerProfile,
 } from "../lib/crypto";
@@ -54,15 +59,33 @@ import {
   type PlayerProfile,
   type ReleaseEscrowResponse,
   type TrackedDiceGame,
+  hasReachedFundingThreshold,
+  isEscrowTerminal,
+  isOwnPaymentConfirmed,
 } from "../lib/escrow";
 
 const APP_SECRET_STORAGE = "pontmore-rollpot-app-secret";
 const GAMES_STORAGE = "pontmore-dice-games";
+const SELECTED_SERVICE_STORAGE = "pontmore-rollpot-selected-service";
 
-export function RollpotClient({ initialService }: { initialService?: EscrowService | null }) {
+export function RollpotClient({
+  initialService,
+  page = "home",
+  gameId,
+}: {
+  initialService?: EscrowService | null;
+  page?: "home" | "escrows" | "games" | "game";
+  gameId?: string;
+}) {
+  const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
+  const [profileEditing, setProfileEditing] = useState(false);
+  const [profilePublishBusy, setProfilePublishBusy] = useState(false);
+  const [profilePublishNotice, setProfilePublishNotice] = useState("");
+  const [playMode, setPlayMode] = useState<"create" | "join">("create");
+  const [escrowDetailsOpen, setEscrowDetailsOpen] = useState(false);
   const [amountSats, setAmountSats] = useState("100");
   const [counterpartyPubkey, setCounterpartyPubkey] = useState("");
   const [service, setService] = useState<EscrowService | null>(initialService ?? null);
@@ -84,10 +107,10 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
       : [],
   );
   const [catalogBusy, setCatalogBusy] = useState(false);
-  const [catalogExpanded, setCatalogExpanded] = useState(false);
   const [detailEntry, setDetailEntry] = useState<EscrowCatalogEntry | null>(null);
   const [playerIdentity, setPlayerIdentity] = useState<EscrowIdentity | null>(null);
   const [playerProfile, setPlayerProfile] = useState<PlayerProfile | null>(null);
+  const [authLoaded, setAuthLoaded] = useState(false);
   const [appSigner, setAppSigner] = useState<EscrowIdentity | null>(null);
   const [escrow, setEscrow] = useState<CreateEscrowResponse | null>(null);
   const [localRole, setLocalRole] = useState<"creator" | "counterparty">("creator");
@@ -103,27 +126,67 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   const [activeGameId, setActiveGameId] = useState("");
   const [inviteInput, setInviteInput] = useState("");
   const [error, setError] = useState("");
+  const [hydrated, setHydrated] = useState(false);
+  const [gameMissing, setGameMissing] = useState(false);
   const validatedServiceRef = useRef<EscrowService | null>(null);
   const validatedSourceRef = useRef<string>("");
 
   useEffect(() => {
     void loadCurrentPlayer()
       .then((player) => {
-        if (!player) return;
-        setPlayerIdentity(player.identity);
-        setPlayerProfile(player.profile);
+        if (player) {
+          setPlayerIdentity(player.identity);
+          setPlayerProfile(player.profile);
+          hydratePublicProfile(player.identity.pubkey, player.profile.name);
+        }
+        setAuthLoaded(true);
       })
       .catch((nextError) => {
         setError(nextError instanceof Error ? nextError.message : String(nextError));
+        setAuthLoaded(true);
       });
     setAppSigner(loadOrCreateIdentity("Rollpot application", APP_SECRET_STORAGE));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEscrowDetailsOpen(false);
     const savedGames = loadTrackedGames();
     setTrackedGames(savedGames);
-
-    if (savedGames[0]) {
-      void restoreTrackedGame(savedGames[0]);
+    if (page === "game") {
+      const savedGame = savedGames.find((game) => game.escrow.escrow_id === gameId);
+      setGameMissing(!savedGame);
+      if (savedGame) {
+        applyTrackedGame(savedGame);
+        void restoreTrackedGame(savedGame, () => !cancelled);
+      }
+    } else {
+      startNewGame();
+      setGameMissing(false);
+      const savedService = loadSelectedService();
+      if (savedService) {
+        setService(savedService);
+        setServiceSelected(true);
+        setDescriptorInput(savedService.source.type === "url" ? savedService.source.url : "");
+        if (page === "escrows") {
+          setCatalog((current) => [
+            {
+              service: savedService,
+              descriptor: savedService.descriptor,
+              source: savedService.source,
+              publisher_pubkey: savedService.source.type === "nostr" ? savedService.source.event.pubkey : "",
+              identifier: serviceLabel(savedService),
+              compatible: true,
+              compatibility_status: "standalone_compatible",
+            },
+            ...current.filter((entry) => entry.service?.service_id !== savedService.service_id),
+          ]);
+        }
+      }
     }
-  }, []);
+    setHydrated(true);
+    return () => { cancelled = true; };
+  }, [page, gameId]);
 
   useEffect(() => {
     if (playerProfile) {
@@ -134,7 +197,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   const fundingModel = escrow?.funding_model || "2_of_2";
   const appSignerTrusted = Boolean(appSigner);
   const canAuthenticate = Boolean(playerIdentity && playerProfile?.lightning_address && appSigner);
-  const canCallService = Boolean(serviceSelected && service?.endpoint && canAuthenticate && appSignerTrusted && !escrow);
+  const canCallService = Boolean(hydrated && serviceSelected && service?.endpoint && canAuthenticate && appSignerTrusted && !escrow);
   const profileConfigured = Boolean(playerIdentity && playerProfile?.name.trim() && playerProfile.lightning_address.trim());
   const needsName = Boolean(playerIdentity && !playerProfile?.name.trim());
   const needsLightningAddress = Boolean(playerIdentity && !playerProfile?.lightning_address.trim());
@@ -148,18 +211,23 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   const playerJoined = Boolean(
     escrow?.counterparty_pubkey || counterpartyPlayer || (creatorStatus?.total_funders ?? 0) >= 2,
   );
-  const creatorPaid = Boolean(creatorStatus?.funded || creatorStatus?.my_funded);
-  const counterpartyPaid = Boolean(counterpartyStatus?.funded || counterpartyStatus?.my_funded);
+  const currentGamePlayer = localRole === "creator" ? creatorPlayer : counterpartyPlayer;
+  const gameIdentityMatches = Boolean(playerIdentity && currentGamePlayer?.pubkey === playerIdentity.pubkey);
   const requiresCounterpartyBeforeFunding = true;
-  const canRequestPayment = Boolean(escrow && (!requiresCounterpartyBeforeFunding || playerJoined));
-  const paymentsReady = Boolean(
-    creatorStatus?.funded ||
-    counterpartyStatus?.funded ||
-    (creatorStatus?.funded_count ?? 0) >= (creatorStatus?.funding_threshold ?? 2) ||
-    (counterpartyStatus?.funded_count ?? 0) >= (counterpartyStatus?.funding_threshold ?? 2),
-  );
+  const canRequestPayment = Boolean(escrow && gameIdentityMatches && (!requiresCounterpartyBeforeFunding || playerJoined));
+  const paymentsReady = Boolean(hasReachedFundingThreshold(creatorStatus) || hasReachedFundingThreshold(counterpartyStatus));
   const myFunding = localRole === "creator" ? creatorFunding : counterpartyFunding;
   const myStatus = localRole === "creator" ? creatorStatus : counterpartyStatus;
+  const technicalStatus = myStatus || creatorStatus || counterpartyStatus;
+  const gameEnded = Boolean(releaseResponse || isEscrowTerminal(technicalStatus));
+  const allPaid = Boolean(escrow?.funding_model === "2_of_2" && (paymentsReady || releaseResponse?.state === "released" || technicalStatus?.state === "released"));
+  const creatorPaid = Boolean(allPaid || isOwnPaymentConfirmed(creatorStatus));
+  const counterpartyPaid = Boolean(allPaid || isOwnPaymentConfirmed(counterpartyStatus));
+  const fundedCounts = [creatorStatus?.funded_count, counterpartyStatus?.funded_count].filter((count): count is number => count != null);
+  const fundedCount = fundedCounts.length ? Math.max(...fundedCounts) : null;
+  const fundingThreshold = technicalStatus?.funding_threshold ?? escrow?.funding_threshold ?? 2;
+  const inviteFundingDeadline = trackedGames.find((game) => game.id === activeGameId)?.invite_funding_deadline;
+  const escrowStateSummary = `${releaseResponse?.state || technicalStatus?.state || escrow?.state || "unknown"}${fundedCount != null ? ` · ${fundedCount}/${fundingThreshold} funded` : allPaid ? " · fully funded" : ""}`;
   const inviteCode = useMemo(() => {
     if (!escrow || localRole !== "creator" || !creatorPlayer || !service || releaseResponse) {
       return "";
@@ -181,38 +249,116 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
       funding_model: escrow.funding_model,
       creator_player: creatorPlayer,
       created_at: new Date().toISOString(),
+      funding_deadline: escrow.funding_deadline,
       service_source: service.source,
     });
   }, [creatorPlayer, escrow, localRole, releaseResponse, service?.source]);
 
   useEffect(() => {
-    if (!escrow || !playerIdentity || localRole !== "creator" || playerJoined || releaseResponse) {
+    if (!escrow || !playerIdentity || !service || !gameIdentityMatches || gameEnded) {
       return;
     }
 
-    let cancelled = false;
-    const syncParticipants = async () => {
-      try {
-        const status = await callEscrow<FundStatusResponse>(playerIdentity, "fund_status", {
-          escrow_id: escrow.escrow_id,
-        });
+    const controller = new AbortController();
+    const identity = playerIdentity;
+    const selectedService = service;
+    const escrowId = escrow.escrow_id;
 
-        if (!cancelled) {
-          setCreatorStatus(status);
+    void (async () => {
+      while (!controller.signal.aborted) {
+        try {
+          const authorization = await buildNip98Authorization(
+            identity,
+            "POST",
+            selectedService.operation_urls.fund_status,
+          );
+          const response = await fetch("/api/escrow/events", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              service_source: selectedService.source,
+              escrow_id: escrowId,
+              authorization,
+            }),
+            signal: controller.signal,
+          });
+          if (!response.ok || !response.body) throw new Error("Escrow event stream unavailable.");
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          try {
+            while (!controller.signal.aborted) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let frameEnd = buffer.indexOf("\n\n");
+              while (frameEnd !== -1) {
+                const frame = buffer.slice(0, frameEnd);
+                buffer = buffer.slice(frameEnd + 2);
+                const event = frame.split("\n").find((line) => line.startsWith("event: "))?.slice(7);
+                const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
+                if (event === "status" && data) {
+                  const status = JSON.parse(data) as FundStatusResponse;
+                  if (status.escrow_id === escrowId && !controller.signal.aborted) {
+                    if (localRole === "creator") setCreatorStatus(status);
+                    else setCounterpartyStatus(status);
+                    const saved = loadTrackedGames().find((game) => game.id === getGameId(selectedService.service_id, escrowId));
+                    const statusKey = localRole === "creator" ? "creator_status" : "counterparty_status";
+                    if (saved && JSON.stringify(saved[statusKey]) !== JSON.stringify(status)) {
+                      saveTrackedGame({ ...saved, [statusKey]: status, updated_at: new Date().toISOString() });
+                    }
+                  }
+                } else if (event === "error") {
+                  throw new Error("Escrow event stream interrupted.");
+                }
+                frameEnd = buffer.indexOf("\n\n");
+              }
+            }
+          } finally {
+            await reader.cancel().catch(() => {});
+          }
+        } catch {
+          // Manual status checks still surface service errors to the player.
         }
-      } catch {
-        // Manual status checks still surface service errors to the player.
+
+        if (!controller.signal.aborted) {
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+        }
       }
-    };
+    })();
 
-    void syncParticipants();
-    const interval = window.setInterval(syncParticipants, 5000);
+    return () => controller.abort();
+  }, [escrow, gameEnded, gameIdentityMatches, localRole, playerIdentity, service]);
 
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [escrow, localRole, playerIdentity, playerJoined, releaseResponse]);
+  useEffect(() => {
+    if (page !== "game" || !escrow) return;
+    let cancelled = false;
+    const participants = [
+      { role: "creator_player" as const, pubkey: creatorPlayer?.pubkey },
+      { role: "counterparty_player" as const, pubkey: counterpartyPlayer?.pubkey || creatorStatus?.counterparty_pubkey || escrow.counterparty_pubkey },
+    ];
+    for (const { role, pubkey } of participants) {
+      if (!pubkey || !/^[0-9a-f]{64}$/.test(pubkey)) continue;
+      void loadNostrProfile(pubkey).then((metadata) => {
+        if (cancelled || !metadata || typeof metadata.name !== "string" || !metadata.name.trim()) return;
+        const saved = loadTrackedGames().find((game) => game.escrow.escrow_id === escrow.escrow_id);
+        if (!saved) return;
+        const previous = saved[role];
+        const profile: PlayerProfile = {
+          name: metadata.name,
+          pubkey,
+          npub: previous?.npub || nip19.npubEncode(pubkey),
+          lightning_address: previous?.lightning_address || (typeof metadata.lud16 === "string" ? metadata.lud16 : ""),
+        };
+        if (previous?.name === profile.name && previous?.pubkey === pubkey) return;
+        if (role === "creator_player") setCreatorPlayer(profile);
+        else setCounterpartyPlayer(profile);
+        saveTrackedGame({ ...saved, [role]: profile, updated_at: new Date().toISOString() });
+      }).catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [page, escrow?.escrow_id, escrow?.counterparty_pubkey, creatorStatus?.counterparty_pubkey, creatorPlayer?.pubkey, counterpartyPlayer?.pubkey]);
 
   async function createEscrow() {
     if (!playerIdentity || !playerProfile) return;
@@ -251,6 +397,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
 
       applyTrackedGame(game);
       saveTrackedGame(game);
+      router.push(gamePath(game));
     });
   }
 
@@ -263,6 +410,8 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
       setPlayerIdentity(player.identity);
       setPlayerProfile(player.profile);
       savePlayerProfile(player.profile);
+      setProfilePublishNotice("");
+      hydratePublicProfile(player.identity.pubkey, player.profile.name);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
@@ -278,6 +427,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
       setPlayerIdentity(player.identity);
       setPlayerProfile(player.profile);
       savePlayerProfile(player.profile);
+      setProfilePublishNotice("");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     }
@@ -305,17 +455,19 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
         enrollment_token: invite.enrollment_token,
         refund_ln_address: playerProfile.lightning_address,
       }, inviteService);
-      const game = baseTrackedGame({
+      if (joined.escrow_id !== invite.escrow_id) throw new Error("Joined escrow did not match the invite.");
+      const game = { ...baseTrackedGame({
         escrow: joined,
         service: inviteService,
         role: "counterparty",
         creator: invite.creator_player,
         counterparty: playerProfile,
-      });
+      }), invite_funding_deadline: invite.funding_deadline };
 
       applyTrackedGame(game);
       saveTrackedGame(game);
       setInviteInput("");
+      router.push(gamePath(game));
     });
   }
 
@@ -356,7 +508,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   }
 
   async function rollAndRelease() {
-    if (!escrow || !appSigner || !playerIdentity) return;
+    if (!escrow || !appSigner || !playerIdentity || !gameIdentityMatches) return;
 
     await runOperation(async () => {
       const creatorRoll = rollDie();
@@ -391,6 +543,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
   }
 
   function updatePlayerProfile(update: Partial<PlayerProfile>) {
+    setProfilePublishNotice("");
     setPlayerProfile((current) => {
       if (!current) return current;
       const next = { ...current, ...update };
@@ -409,6 +562,57 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
     });
   }
 
+  function hydratePublicProfile(pubkey: string, initialName: string) {
+    void loadNostrProfile(pubkey).then((metadata) => {
+      if (!metadata) return;
+      const publicName = typeof metadata.name === "string" && metadata.name.trim() ? metadata.name : "";
+      setPlayerProfile((current) => {
+        if (!current || current.pubkey !== pubkey) return current;
+        return {
+          ...current,
+          name: current.name === initialName && publicName ? publicName : current.name,
+          lightning_address: !current.lightning_address && typeof metadata.lud16 === "string" ? metadata.lud16 : current.lightning_address,
+        };
+      });
+      if (publicName) syncSavedGameName(pubkey, publicName);
+    }).catch(() => {
+      // Browser-saved profile remains usable when public relays are unavailable.
+    });
+  }
+
+  function syncSavedGameName(pubkey: string, name: string) {
+    let changed = false;
+    const games = loadTrackedGames().map((game) => {
+      const creator = game.creator_player?.pubkey === pubkey && game.creator_player.name !== name
+        ? { ...game.creator_player, name } : game.creator_player;
+      const counterparty = game.counterparty_player?.pubkey === pubkey && game.counterparty_player.name !== name
+        ? { ...game.counterparty_player, name } : game.counterparty_player;
+      if (creator === game.creator_player && counterparty === game.counterparty_player) return game;
+      changed = true;
+      return { ...game, creator_player: creator, counterparty_player: counterparty };
+    });
+    if (changed) {
+      window.localStorage.setItem(GAMES_STORAGE, JSON.stringify(games));
+      setTrackedGames(games);
+    }
+  }
+
+  async function saveProfileToNostr() {
+    if (!playerIdentity || !playerProfile) return;
+    setProfilePublishBusy(true);
+    setProfilePublishNotice("");
+    try {
+      const result = await publishPlayerProfile(playerIdentity, playerProfile);
+      syncSavedGameName(playerIdentity.pubkey, playerProfile.name.trim());
+      setProfilePublishNotice(`Published to ${result.published.length} Nostr relay${result.published.length === 1 ? "" : "s"}.`);
+      setProfileEditing(false);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setProfilePublishBusy(false);
+    }
+  }
+
   function startNewGame() {
     setActiveGameId("");
     setCounterpartyPubkey("");
@@ -425,17 +629,16 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
     setError("");
   }
 
-  async function restoreTrackedGame(game: TrackedDiceGame) {
-    setBusy(true);
-    setError("");
-
+  async function restoreTrackedGame(game: TrackedDiceGame, isCurrent: () => boolean) {
     try {
       const refreshedService = await discoverService(game.service.source);
+      if (!isCurrent()) return;
+      validatedServiceRef.current = refreshedService;
+      validatedSourceRef.current = serializeSource(refreshedService.source);
       applyTrackedGame({ ...game, service: refreshedService });
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-    } finally {
-      setBusy(false);
+      // Keep the saved game visible even if its descriptor is temporarily unavailable.
+      if (isCurrent()) setError(nextError instanceof Error ? nextError.message : String(nextError));
     }
   }
 
@@ -490,14 +693,10 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
 
   function saveTrackedGame(game: TrackedDiceGame) {
     setActiveGameId(game.id);
-    setTrackedGames((current) => {
-      const nextGames = [game, ...current.filter((entry) => entry.id !== game.id)]
-        .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
-        .slice(0, 20);
-
-      window.localStorage.setItem(GAMES_STORAGE, JSON.stringify(nextGames));
-      return nextGames;
-    });
+    const nextGames = [game, ...loadTrackedGames().filter((entry) => entry.id !== game.id)]
+      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at));
+    window.localStorage.setItem(GAMES_STORAGE, JSON.stringify(nextGames));
+    setTrackedGames(nextGames);
   }
 
   function deleteTrackedGame(gameId: string) {
@@ -617,7 +816,6 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
           ) === index,
         );
       });
-      setCatalogExpanded(true);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
@@ -629,78 +827,71 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
     startNewGame();
     setService(nextService);
     setServiceSelected(true);
-    setCatalogExpanded(false);
     setDescriptorInput(nextService.source.type === "url" ? nextService.source.url : "");
+    window.localStorage.setItem(SELECTED_SERVICE_STORAGE, JSON.stringify(nextService));
+    if (page === "escrows") router.push("/");
   }
 
   return (
     <Box component="main" sx={{ minHeight: "100vh", py: { xs: 2, md: 4 } }}>
-      <Container maxWidth="lg">
+      <Container maxWidth={page === "home" ? "lg" : "md"}>
         <Stack spacing={2.5}>
           <Paper elevation={0} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2, p: { xs: 2, md: 3 } }}>
             <Stack direction={{ xs: "column", md: "row" }} spacing={2.5} sx={{ alignItems: { md: "center" }, justifyContent: "space-between" }}>
               <Box>
                 <Chip icon={<CasinoIcon />} label="Rollpot" color="primary" sx={{ mb: 1.5 }} />
-                <Typography component="h1" variant="h2" sx={{ fontWeight: 900, letterSpacing: 0 }}>
-                  Rollpot
+                <Typography component="h1" variant={page === "home" ? "h2" : "h3"} sx={{ fontWeight: 900, letterSpacing: 0 }}>
+                  {page === "home" ? "Rollpot" : page === "escrows" ? "Escrows" : page === "games" ? "Games" : escrow
+                    ? `${creatorPlayer?.name || "Player 1"} vs ${counterpartyPlayer?.name || "Player 2"}`
+                    : "Game"}
                 </Typography>
-                <Typography color="text.secondary">Invite a Nostr player, fund the pot, roll once.</Typography>
+                <Typography color="text.secondary">
+                  {page === "home"
+                    ? "Invite a Nostr player, fund the pot, roll once."
+                    : page === "escrows"
+                      ? "Choose the escrow service for your next game."
+                      : page === "games"
+                        ? "Your saved games, newest first."
+                      : escrow ? `${escrow.amount_sats * 2} sats pot · ${gameEnded ? "Ended" : !playerJoined ? "Waiting for Player 2" : paymentsReady ? "Ready to roll" : "Funding"}` : "Your saved game"}
+                </Typography>
               </Box>
-              <Stack direction="row" spacing={2} sx={{ justifyContent: { xs: "center", md: "flex-end" } }}>
-                <DiceFace label={creatorPlayer?.name || "Player 1"} value={gameResult?.creator_roll ?? null} />
-                <DiceFace label={counterpartyPlayer?.name || "Player 2"} value={gameResult?.counterparty_roll ?? null} />
-              </Stack>
+              {page === "game" ? (
+                <Stack spacing={1.5} sx={{ alignItems: { md: "flex-end" } }}>
+                  <Button component={Link} href="/games" variant="outlined" size="small">All games</Button>
+                  {gameResult ? <Stack direction="row" spacing={2}>
+                    <DiceFace label={creatorPlayer?.name || "Player 1"} value={gameResult.creator_roll} />
+                    <DiceFace label={counterpartyPlayer?.name || "Player 2"} value={gameResult.counterparty_roll} />
+                  </Stack> : null}
+                </Stack>
+              ) : (
+                <Stack direction="row" spacing={1}>
+                  {page !== "home" ? <Button component={Link} href="/" variant="outlined">Home</Button> : null}
+                  {page === "home" ? <Button component={Link} href="/escrows" variant="outlined">Escrows</Button> : null}
+                </Stack>
+              )}
             </Stack>
           </Paper>
 
           {busy ? <LinearProgress /> : null}
           {error ? <Alert severity="error">{error}</Alert> : null}
-          {serviceSelected && !appSignerTrusted ? (
+          {page === "home" && serviceSelected && !appSignerTrusted ? (
             <Alert severity="error">
               This escrow does not trust this Rollpot application signer. Creating a game would leave Rollpot unable to release the wager.
             </Alert>
           ) : null}
-          {!serviceSelected ? <Alert severity="info">Select an escrow before creating a game.</Alert> : null}
+          {page === "home" && !serviceSelected ? <Alert severity="info">Select an escrow before creating a game.</Alert> : null}
 
-          <Paper elevation={0} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2, p: 2 }}>
-            {serviceSelected && !catalogExpanded && service ? (
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
-                <Box sx={{ minWidth: 0 }}>
-                  <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
-                    <Chip size="small" label="selected" color="primary" />
-                    <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
-                      {service.source.type === "nostr"
-                        ? service.source.event.tags.find(([name]) => name === "d")?.[1] || "Nostr escrow"
-                        : "Direct URL escrow"}
-                    </Typography>
-                  </Stack>
-                  <Typography variant="body2" color="text.secondary">
-                    {service.descriptor.escrow_type} · {service.descriptor.networks.join(", ")} · {service.funding_models?.join(", ") || "escrow"}
-                  </Typography>
-                </Box>
-                <Button size="small" variant="outlined" onClick={() => setCatalogExpanded(true)}>
-                  Change escrow
-                </Button>
-              </Stack>
-            ) : (
+          {page === "escrows" ? <Paper elevation={0} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2, p: 2 }}>
               <Stack spacing={1.5} sx={{ mb: 2 }}>
                 <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
                   <Box>
                     <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>Available escrows</Typography>
                     <Typography variant="body2" color="text.secondary">Query PIP-01 descriptors from public Nostr relays, then select one for a new game.</Typography>
                   </Box>
-                  <Stack direction="row" spacing={1}>
-                    {serviceSelected ? (
-                      <Button size="small" variant="text" onClick={() => setCatalogExpanded(false)}>
-                        Collapse
-                      </Button>
-                    ) : null}
-                    <Button size="small" variant="contained" onClick={() => void loadEscrowCatalog()} disabled={catalogBusy}>
-                      {catalogBusy ? "Discovering..." : "Discover escrows"}
-                    </Button>
-                  </Stack>
+                  <Button size="small" variant="contained" onClick={() => void loadEscrowCatalog()} disabled={catalogBusy}>
+                    {catalogBusy ? "Discovering..." : "Discover escrows"}
+                  </Button>
                 </Stack>
-                {catalogExpanded ? (
                   <Stack spacing={1}>
                     {catalog.map((entry) => {
                     const candidate = entry.service;
@@ -723,7 +914,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                     const statusColor = entry.compatibility_status === "discovery_only" ? "info" : selectable ? "success" : "warning";
 
                       return (
-                        <Paper key={`${entry.publisher_pubkey}:${entry.identifier}:${entry.source.type}`} variant="outlined" sx={{ p: 1.5 }}>
+                        <Paper key={serializeSource(entry.source)} variant="outlined" sx={{ p: 1.5 }}>
                         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
                           <Box sx={{ minWidth: 0, cursor: "pointer" }} onClick={() => setDetailEntry(entry)}>
                             <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
@@ -746,11 +937,8 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                       );
                     })}
                   </Stack>
-                ) : null}
               </Stack>
-            )}
-            {(!serviceSelected || catalogExpanded) ? (
-              <>
+            <>
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>Direct URL fallback</Typography>
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ alignItems: { md: "flex-start" } }}>
                   <TextField
@@ -766,11 +954,19 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                   </Button>
                 </Stack>
               </>
-            ) : null}
-          </Paper>
+          </Paper> : null}
 
-          <Stack direction={{ xs: "column", md: "row" }} spacing={2.5} sx={{ alignItems: "flex-start" }}>
-            <Stack spacing={2.5} sx={{ width: { xs: "100%", md: 340 }, flexShrink: 0 }}>
+          {page !== "escrows" ? <Stack
+            direction={{ xs: "column", md: "row" }}
+            spacing={page === "home" ? 0 : 2.5}
+            sx={page === "home" ? {
+              display: "grid",
+              gridTemplateColumns: { xs: "minmax(0, 1fr)", md: "repeat(2, minmax(0, 1fr))" },
+              gap: 2.5,
+              alignItems: "stretch",
+            } : { alignItems: "flex-start" }}
+          >
+            {page === "home" ? <Stack spacing={0} sx={{ display: "contents" }}>
               <Card variant="outlined">
                 <CardContent>
                   <Stack spacing={2}>
@@ -790,18 +986,26 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                           Create local identity
                         </AuthAction>
                       </Stack>
-                    ) : (
-                      <Stack direction="row" spacing={1}>
-                        <Button type="button" disabled={authBusy} variant="outlined" onClick={loginWithNostr} startIcon={<LoginIcon />}>
-                          Switch Nostr
-                        </Button>
-                        <Button type="button" variant="outlined" onClick={signupLocalPlayer} startIcon={<PersonAddIcon />}>
-                          New local
-                        </Button>
+                    ) : null}
+                    {playerIdentity && profileConfigured && !profileEditing ? (
+                      <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{playerProfile?.name}</Typography>
+                          <Typography variant="body2" color="text.secondary" noWrap>{playerProfile?.lightning_address}</Typography>
+                        </Box>
+                        <Button size="small" variant="outlined" onClick={() => setProfileEditing(true)}>Edit</Button>
                       </Stack>
-                    )}
-                    {playerIdentity ? (
+                    ) : null}
+                    {playerIdentity && (!profileConfigured || profileEditing) ? (
                       <>
+                        <Stack direction="row" spacing={1}>
+                          <Button type="button" disabled={authBusy} variant="outlined" onClick={loginWithNostr} startIcon={<LoginIcon />}>
+                            Switch Nostr
+                          </Button>
+                          <Button type="button" variant="outlined" onClick={signupLocalPlayer} startIcon={<PersonAddIcon />}>
+                            New local
+                          </Button>
+                        </Stack>
                         {needsLightningAddress ? <Alert severity="warning">Add a Lightning address before creating or joining a game.</Alert> : null}
                         <TextField
                           label="Name"
@@ -822,13 +1026,17 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                           error={needsLightningAddress}
                           helperText={needsLightningAddress ? "Required for refunds and payouts" : " "}
                         />
+                        {profileConfigured ? <Button size="small" onClick={() => setProfileEditing(false)} sx={{ alignSelf: "flex-end" }}>Done</Button> : null}
                       </>
                     ) : null}
+                    {profileConfigured ? <Button disabled={profilePublishBusy} size="small" variant="outlined" onClick={saveProfileToNostr} sx={{ alignSelf: "flex-start" }}>
+                      {profilePublishBusy ? "Publishing…" : "Save to Nostr"}
+                    </Button> : null}
+                    {profilePublishNotice ? <Alert severity="success">{profilePublishNotice}</Alert> : null}
                   </Stack>
                 </CardContent>
               </Card>
 
-              {profileConfigured ? (
                 <Card variant="outlined">
                   <CardContent>
                     <Stack spacing={2}>
@@ -836,10 +1044,29 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                         <Typography variant="h6" sx={{ fontWeight: 900 }}>
                           Play
                         </Typography>
-                        <Button size="small" variant="text" startIcon={<AddIcon />} onClick={startNewGame}>
-                          New
+                      </Stack>
+                      <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
+                        <Typography variant="body2" color="text.secondary">
+                          Escrow: {serviceSelected && service ? serviceLabel(service) : "none selected"}
+                        </Typography>
+                        <Button component={Link} href="/escrows" size="small" variant="text">
+                          Change escrow
                         </Button>
                       </Stack>
+                      {!profileConfigured ? <Alert severity="info">Complete your player profile to create or join a game.</Alert> : null}
+                      {profileConfigured ? <>
+                      <ToggleButtonGroup
+                        exclusive
+                        fullWidth
+                        size="small"
+                        value={playMode}
+                        onChange={(_, nextMode: "create" | "join" | null) => { if (nextMode) setPlayMode(nextMode); }}
+                        aria-label="Choose how to play"
+                      >
+                        <ToggleButton value="create">Create</ToggleButton>
+                        <ToggleButton value="join">Join</ToggleButton>
+                      </ToggleButtonGroup>
+                      {playMode === "create" ? <>
                       <TextField label="Amount per player, sats" value={amountSats} onChange={(event) => setAmountSats(event.target.value)} size="small" type="number" />
                       {requiresCounterpartyPubkey ? (
                         <TextField
@@ -860,75 +1087,70 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                       >
                         Create game
                       </Button>
+                      </> : <>
                       <TextField label="Invite code" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} size="small" multiline minRows={3} />
                       <Button disabled={!canAuthenticate || !inviteInput.trim() || busy} variant="outlined" onClick={joinInvite} startIcon={<LoginIcon />}>
                         Join game
                       </Button>
-                      {trackedGames.length > 0 ? (
-                        <Stack spacing={1} sx={{ pt: 1 }}>
-                          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                            <HistoryIcon color="primary" fontSize="small" />
-                            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
-                              Saved games
-                            </Typography>
-                          </Stack>
-                          {trackedGames.slice(0, 4).map((game) => {
-                            const expired = isGameExpired(game);
-                            return (
-                              <Stack key={game.id} direction="row" spacing={0.5} sx={{ alignItems: "stretch" }}>
-                                <Button
-                                  variant={game.id === activeGameId ? "contained" : "outlined"}
-                                  color={game.release ? "success" : "primary"}
-                                  onClick={() => void restoreTrackedGame(game)}
-                                  sx={{ justifyContent: "flex-start", textAlign: "left", flex: 1 }}
-                                >
-                                  <Stack spacing={0.25} sx={{ alignItems: "flex-start", width: "100%" }}>
-                                    <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
-                                      {game.release ? winnerLabel(game.release.recipient, game) : `${game.amount_sats} sats per player`}
-                                    </Typography>
-                                    <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                                      {game.release ? "Settled" : gameStatusLabel(game)} · {formatGameTime(game.updated_at)}
-                                    </Typography>
-                                  </Stack>
-                                </Button>
-                                {expired ? (
-                                  <Tooltip title="Delete expired game">
-                                    <Button
-                                      size="small"
-                                      variant="outlined"
-                                      color="error"
-                                      onClick={() => deleteTrackedGame(game.id)}
-                                      sx={{ minWidth: 36, px: 1 }}
-                                    >
-                                      <DeleteIcon fontSize="small" />
-                                    </Button>
-                                  </Tooltip>
-                                ) : null}
-                              </Stack>
-                            );
-                          })}
-                        </Stack>
-                      ) : null}
+                      </>}
+                      </> : null}
                     </Stack>
                   </CardContent>
                 </Card>
-              ) : null}
-            </Stack>
+            </Stack> : null}
 
-            <Stack spacing={2.5} sx={{ flex: 1, minWidth: 0, width: "100%" }}>
-              {!profileConfigured ? (
+            <Stack spacing={page === "home" ? 0 : 2.5} sx={page === "home" ? { display: "contents" } : { flex: 1, minWidth: 0, width: "100%" }}>
+              {page === "home" || page === "games" ? <>
+              <Card variant="outlined" sx={page === "home" ? { gridColumn: "1 / -1" } : undefined}>
+                <CardContent>
+                  <Stack spacing={1.5}>
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                      <HistoryIcon color="primary" fontSize="small" />
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>{page === "home" ? "Recent Games" : "All games"}</Typography>
+                    </Stack>
+                    {trackedGames.length === 0 ? (
+                      <Typography color="text.secondary">Games you create or join appear here.</Typography>
+                    ) : trackedGames.slice(0, page === "home" ? 3 : undefined).map((game) => (
+                      <Stack key={game.id} direction="row" spacing={1} sx={{ alignItems: "stretch" }}>
+                        <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.25, flex: 1, minWidth: 0 }}>
+                          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
+                            <Stack spacing={0.25} sx={{ minWidth: 0 }}>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
+                              {game.release
+                                ? `Winner: ${winnerLabel(game.release.recipient, game)}`
+                                : `${game.creator_player?.name || "Player 1"}${game.counterparty_player ? ` vs ${game.counterparty_player.name}` : "'s game"}`}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {game.amount_sats} sats each · {game.release ? "Settled" : gameStatusLabel(game)} · {formatGameTime(game.updated_at)}
+                            </Typography>
+                            </Stack>
+                            <Button component={Link} href={gamePath(game)} size="small" variant="outlined" sx={{ flexShrink: 0, alignSelf: { xs: "flex-start", sm: "center" } }}>
+                              View Game
+                            </Button>
+                          </Stack>
+                        </Box>
+                        {isGameExpired(game) ? (
+                          <Tooltip title="Delete expired game">
+                            <Button size="small" variant="outlined" color="error" onClick={() => deleteTrackedGame(game.id)} sx={{ minWidth: 36, px: 1 }}>
+                              <DeleteIcon fontSize="small" />
+                            </Button>
+                          </Tooltip>
+                        ) : null}
+                      </Stack>
+                    ))}
+                    {page === "home" ? <Button component={Link} href="/games" size="small" variant="contained" sx={{ alignSelf: "flex-start" }}>
+                      View All Games
+                    </Button> : null}
+                  </Stack>
+                </CardContent>
+              </Card>
+              </> : !hydrated ? <LinearProgress /> : gameMissing ? (
                 <Card variant="outlined">
                   <CardContent>
-                    <Stack spacing={2}>
-                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
-                        Complete profile
-                      </Typography>
-                      <Typography color="text.secondary">Rollpot needs a player name, Nostr pubkey, and Lightning address before games are available.</Typography>
-                      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-                        <Chip label={playerIdentity ? "Nostr ready" : "Nostr required"} color={playerIdentity ? "success" : "default"} />
-                        <Chip label={needsName ? "Name required" : "Name ready"} color={needsName ? "warning" : "success"} />
-                        <Chip label={needsLightningAddress ? "Lightning required" : "Lightning ready"} color={needsLightningAddress ? "warning" : "success"} />
-                      </Stack>
+                    <Stack spacing={1.5}>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>Game not found</Typography>
+                      <Typography color="text.secondary">This game is not saved in this browser.</Typography>
+                      <Button component={Link} href="/games" variant="outlined" sx={{ alignSelf: "flex-start" }}>View saved games</Button>
                     </Stack>
                   </CardContent>
                 </Card>
@@ -936,40 +1158,39 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                 <Card variant="outlined">
                   <CardContent>
                     <Stack spacing={2}>
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
-                        <Box>
-                          <Typography variant="h6" sx={{ fontWeight: 900 }}>
-                            Current game
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary">
-                            {escrow ? `${escrow.amount_sats * 2} sats pot` : "No active game"}
-                          </Typography>
-                        </Box>
-                        {escrow ? <Chip label={releaseResponse ? "settled" : paymentsReady ? "ready to roll" : "funding"} color={releaseResponse || paymentsReady ? "success" : "default"} /> : null}
-                      </Stack>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {gameEnded ? "Game over" : !playerJoined ? "Invite Player 2" : paymentsReady ? "Ready to roll" : "Fund the pot"}
+                      </Typography>
 
                       {escrow ? (
                         <Stack spacing={2.25}>
+                        {authLoaded && !gameIdentityMatches ? (
+                          <Alert severity="warning">
+                            Sign in on the home page with the Nostr identity used for this game before requesting payment or rolling.
+                          </Alert>
+                        ) : null}
                         <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
                           <PlayerLine label="Player 1" profile={creatorPlayer} ready={Boolean(creatorPlayer)} paid={creatorPaid} />
                           <PlayerLine label="Player 2" profile={counterpartyPlayer} ready={playerJoined} paid={counterpartyPaid} />
                         </Stack>
 
-                          {inviteCode ? <InviteCode code={inviteCode} /> : null}
+                          {inviteCode && !playerJoined ? <InviteCode code={inviteCode} /> : null}
 
+                          {playerJoined && !paymentsReady && !gameEnded ? (
                           <FundingStatusCard
-                            title="Your payment"
+                            title={`Pay ${escrow.amount_sats} sats`}
                             disabled={!canRequestPayment || busy}
                             instructions={myFunding}
                             status={myStatus}
-                            waitingForPlayers={Boolean(escrow && requiresCounterpartyBeforeFunding && !playerJoined)}
                             onInstructions={loadMyFunding}
                             onStatus={refreshMyStatus}
                           />
+                          ) : null}
 
-                          <Button disabled={!escrow || !paymentsReady || busy || Boolean(releaseResponse)} variant="contained" color="secondary" onClick={rollAndRelease} startIcon={<CasinoIcon />}>
+                          {paymentsReady && !gameEnded ? <Alert severity="success">Both payments received.</Alert> : null}
+                          {paymentsReady && !gameEnded ? <Button disabled={!gameIdentityMatches || busy} variant="contained" color="secondary" onClick={rollAndRelease} startIcon={<CasinoIcon />}>
                             Roll
-                          </Button>
+                          </Button> : null}
                           {releaseResponse ? (
                             <Alert severity="success">
                               {winnerLabel(releaseResponse.recipient, {
@@ -978,6 +1199,7 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                               })} {releaseResponse.payout_sats} sats.
                             </Alert>
                           ) : null}
+                          {!releaseResponse && isEscrowTerminal(technicalStatus) ? <Alert severity="info">The escrow is {technicalStatus?.state}. Check Escrow state for details.</Alert> : null}
                         </Stack>
                       ) : (
                         <Alert severity="info">Create a game or paste an invite code to start.</Alert>
@@ -986,12 +1208,45 @@ export function RollpotClient({ initialService }: { initialService?: EscrowServi
                   </CardContent>
                 </Card>
               )}
+              {page === "game" && escrow && !gameMissing ? <Card variant="outlined">
+                <CardContent>
+                  <Stack spacing={1.5}>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: { sm: "center" }, justifyContent: "space-between" }}>
+                      <Box>
+                        <Typography variant="h6" sx={{ fontWeight: 900 }}>Escrow state</Typography>
+                        <Typography variant="body2" color="text.secondary">{escrowStateSummary}</Typography>
+                      </Box>
+                      <Button size="small" variant="outlined" aria-expanded={escrowDetailsOpen} onClick={() => setEscrowDetailsOpen((open) => !open)}>
+                        {escrowDetailsOpen ? "Hide Details" : "View Details"}
+                      </Button>
+                    </Stack>
+                    {escrowDetailsOpen ? <Stack spacing={1.5} sx={{ pt: 0.5 }}>
+                      <KeyValue label="Escrow ID" value={escrow.escrow_id} copy />
+                      <KeyValue label="Service state" value={releaseResponse?.state || technicalStatus?.state || escrow.state} />
+                      <KeyValue label="Funding model" value={escrow.funding_model} />
+                      <KeyValue label="Funding threshold" value={`${fundingThreshold} of ${escrow.participant_count ?? 2}`} />
+                      <KeyValue label="Reported funded count" value={fundedCount == null ? "Not provided by service" : String(fundedCount)} />
+                      <KeyValue label="Threshold reached" value={paymentsReady ? "Yes (service state active)" : allPaid ? "Yes (escrow released)" : "Not yet confirmed"} />
+                      {technicalStatus?.total_funders != null ? <KeyValue label="Registered funders" value={String(technicalStatus.total_funders)} /> : null}
+                      {!allPaid && !gameEnded && (escrow.funding_deadline || inviteFundingDeadline) ? <KeyValue
+                        label={escrow.funding_deadline ? "Funding deadline (service)" : "Funding deadline (creator invite)"}
+                        value={escrow.funding_deadline || inviteFundingDeadline || ""}
+                      /> : null}
+                      {releaseResponse ? <KeyValue label="Release" value={`${releaseResponse.payout_sats} sats to ${releaseResponse.recipient}`} /> : null}
+                      {service ? <KeyValue label="Escrow service" value={serviceLabel(service)} /> : null}
+                      <Button disabled={!gameIdentityMatches || busy} size="small" variant="text" onClick={refreshMyStatus} sx={{ alignSelf: "flex-start" }}>
+                        Refresh state
+                      </Button>
+                    </Stack> : null}
+                  </Stack>
+                </CardContent>
+              </Card> : null}
             </Stack>
-          </Stack>
+          </Stack> : null}
         </Stack>
       </Container>
 
-      <EscrowDetailDialog entry={detailEntry} onClose={() => setDetailEntry(null)} appSigner={appSigner} onSelect={selectService} canSelect={(entry) => entry.compatible && Boolean(entry.service) && isApplicationSignerTrusted(entry.service!, appSigner?.pubkey)} />
+      {page === "escrows" ? <EscrowDetailDialog entry={detailEntry} onClose={() => setDetailEntry(null)} appSigner={appSigner} onSelect={selectService} canSelect={(entry) => entry.compatible && Boolean(entry.service) && isApplicationSignerTrusted(entry.service!, appSigner?.pubkey)} /> : null}
     </Box>
   );
 }
@@ -1117,21 +1372,22 @@ function baseTrackedGame({
 
 function InviteCode({ code }: { code: string }) {
   return (
-    <Box>
-      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 900, textTransform: "uppercase" }}>
-        Invite code
-      </Typography>
-      <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
-        <Typography variant="body2" sx={{ overflowWrap: "anywhere", minWidth: 0 }}>
-          {code}
-        </Typography>
-        <Tooltip title="Copy invite">
-          <Button size="small" variant="text" onClick={() => navigator.clipboard.writeText(code)} sx={{ minWidth: 36 }}>
-            <ContentCopyIcon fontSize="small" />
-          </Button>
-        </Tooltip>
+    <Stack spacing={1}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Invite Player 2</Typography>
+        <Button size="small" variant="outlined" startIcon={<ContentCopyIcon />} onClick={() => navigator.clipboard.writeText(code)}>
+          Copy invite
+        </Button>
       </Stack>
-    </Box>
+      <TextField
+        label="Invite code"
+        value={code}
+        size="small"
+        fullWidth
+        slotProps={{ input: { readOnly: true } }}
+        sx={{ "& input": { textOverflow: "ellipsis" } }}
+      />
+    </Stack>
   );
 }
 
@@ -1197,19 +1453,39 @@ function loadTrackedGames(): TrackedDiceGame[] {
   }
 }
 
+function loadSelectedService(): EscrowService | null {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(SELECTED_SERVICE_STORAGE) || "null") as EscrowService | null;
+    return saved?.source && saved?.operation_urls && saved?.endpoint ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function gamePath(game: TrackedDiceGame) {
+  return `/games/${encodeURIComponent(game.escrow.escrow_id)}`;
+}
+
+function serviceLabel(service: EscrowService) {
+  return service.source.type === "nostr"
+    ? service.source.event.tags.find(([name]) => name === "d")?.[1] || "Nostr escrow"
+    : "Direct URL escrow";
+}
+
 function isGameExpired(game: TrackedDiceGame) {
   if (game.release) return false;
 
-  const counterpartyJoined = Boolean(game.counterparty_player || game.escrow.counterparty_pubkey);
   const escrowFunded =
     game.creator_status?.funded ||
+    game.creator_status?.my_funded ||
     game.counterparty_status?.funded ||
+    game.counterparty_status?.my_funded ||
+    (game.creator_status?.funded_count ?? 0) > 0 ||
+    (game.counterparty_status?.funded_count ?? 0) > 0 ||
     (game.creator_status?.funded_count ?? 0) >= (game.creator_status?.funding_threshold ?? 2) ||
     (game.counterparty_status?.funded_count ?? 0) >= (game.counterparty_status?.funding_threshold ?? 2);
 
-  if (counterpartyJoined && escrowFunded) return false;
-
-  if (!counterpartyJoined) return true;
+  if (escrowFunded) return false;
 
   const now = Date.now();
   const deadline = game.escrow.funding_deadline ? Date.parse(game.escrow.funding_deadline) : 0;
@@ -1235,6 +1511,7 @@ function decodeInvite(value: string): GameInvite {
     invite.game !== "rollpot" ||
     !invite.enrollment_token ||
     (invite.counterparty_pubkey != null && !/^[0-9a-f]{64}$/.test(invite.counterparty_pubkey)) ||
+    (invite.funding_deadline != null && (typeof invite.funding_deadline !== "string" || Number.isNaN(Date.parse(invite.funding_deadline)))) ||
     !isDescriptorSource(invite.service_source) ||
     !invite.creator_player?.lightning_address
   ) {
@@ -1311,14 +1588,10 @@ function assertPlayableProfile(profile: PlayerProfile) {
 }
 
 function gameStatusLabel(game: TrackedDiceGame) {
-  const funded =
-    game.creator_status?.funded ||
-    game.counterparty_status?.funded ||
-    (game.creator_status?.funded_count ?? 0) >= (game.creator_status?.funding_threshold ?? 2) ||
-    (game.counterparty_status?.funded_count ?? 0) >= (game.counterparty_status?.funding_threshold ?? 2);
-
-  if (funded) return "Ready to roll";
-  if (game.counterparty_player || game.escrow.counterparty_pubkey) return "Funding";
+  const status = game.creator_status || game.counterparty_status;
+  if (isEscrowTerminal(status)) return status!.state;
+  if (hasReachedFundingThreshold(game.creator_status) || hasReachedFundingThreshold(game.counterparty_status)) return "Ready to roll";
+  if (game.counterparty_player || game.escrow.counterparty_pubkey || (game.creator_status?.total_funders ?? 0) >= 2) return "Funding";
   return "Waiting for player 2";
 }
 
@@ -1371,13 +1644,8 @@ function PlayerLine({
             {profile?.name || label}
           </Typography>
         </Stack>
-        <Chip size="small" label={paid ? "paid" : ready ? "ready" : "not joined"} color={paid ? "success" : "default"} />
+        <Chip size="small" label={paid ? "paid" : ready ? "joined" : "waiting"} color={paid ? "success" : "default"} />
       </Stack>
-      {profile ? (
-        <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-          {profile.npub} · {profile.lightning_address}
-        </Typography>
-      ) : null}
     </Stack>
   );
 }
