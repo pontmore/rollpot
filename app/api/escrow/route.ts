@@ -5,6 +5,7 @@ import { discoverSource, readBoundedText, validateNip98Authorization } from "../
 const ALLOWED_OPERATIONS = new Set<string>(REQUIRED_OPERATIONS);
 
 export async function POST(request: Request) {
+  let operationForLog = "unknown";
   try {
     const body = (await request.json()) as {
       service_source?: EscrowDescriptorSource;
@@ -14,6 +15,7 @@ export async function POST(request: Request) {
     };
 
     const operation = body.operation?.trim();
+    operationForLog = operation || operationForLog;
     const startedAt = Date.now();
 
     if (!operation || !ALLOWED_OPERATIONS.has(operation)) {
@@ -60,7 +62,16 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error("[rollpot] escrow proxy error", error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Escrow request failed." }, { status: 400 });
+    const message = error instanceof Error ? error.message : "Escrow request failed.";
+    const transportFailure = error instanceof TypeError && message === "fetch failed";
+    console.error("[rollpot] escrow proxy error", {
+      operation: operationForLog,
+      error: message,
+      cause: error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined,
+    });
+    return NextResponse.json(
+      { error: transportFailure ? `Escrow service unavailable during ${operationForLog}.` : message },
+      { status: transportFailure ? 502 : 400 },
+    );
   }
 }
