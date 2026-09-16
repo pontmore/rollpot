@@ -972,6 +972,7 @@ export function RollpotClient({
 
   function updatePlayerProfile(update: Partial<PlayerProfile>) {
     setProfilePublishNotice("");
+    setProfileEditing(true);
     setPlayerProfile((current) => {
       if (!current) return current;
       const next = { ...current, ...update };
