@@ -1482,12 +1482,11 @@ export function RollpotClient({
                           error={needsLightningAddress}
                           helperText={needsLightningAddress ? "Required for refunds and payouts" : " "}
                         />
-                        {profileConfigured ? <Button size="small" onClick={() => setProfileEditing(false)} sx={{ alignSelf: "flex-end" }}>Done</Button> : null}
+                        {profileConfigured ? <Button size="small" variant="contained" disabled={profilePublishBusy} onClick={() => void saveProfileToNostr()} sx={{ alignSelf: "flex-end" }}>
+                          {profilePublishBusy ? "Saving…" : "Save profile"}
+                        </Button> : null}
                       </>
                     ) : null}
-                    {profileConfigured ? <Button disabled={profilePublishBusy} size="small" variant="outlined" onClick={saveProfileToNostr} sx={{ alignSelf: "flex-start" }}>
-                      {profilePublishBusy ? "Publishing…" : "Save to Nostr"}
-                    </Button> : null}
                     {profilePublishNotice ? <Alert severity="success">{profilePublishNotice}</Alert> : null}
                   </Stack>
                 </CardContent>
