@@ -1,5 +1,3 @@
-export const DESCRIPTOR_URL = "https://standalone-escrow.onrender.com/pontmore/v1/descriptor";
-
 export const REQUIRED_OPERATIONS = ["create", "funding_instructions", "fund_status", "release", "refund", "cancel"] as const;
 
 export type EscrowDescriptorSource =
@@ -10,18 +8,19 @@ export type EscrowDescriptor = {
   version: number;
   escrow_type: string;
   networks: string[];
-  funding_rules: {
+  expires_at?: number;
+  funding_rules?: {
     funding_threshold: number;
     participant_count: number;
     required_confirmation: string;
     funding_timeout?: string;
   };
-  dispute_rules: {
+  dispute_rules?: {
     policy: string;
     timeout_fallback?: string;
   };
-  reference_format: string;
-  updated_at: number;
+  reference_format?: string;
+  updated_at?: number;
   service?: {
     schema?: {
       type?: string;
@@ -132,6 +131,7 @@ export type ReleaseEscrowResponse = {
 
 export type DiceGameResult = {
   escrow_id: string;
+  result_event_id?: string;
   creator_roll: number;
   counterparty_roll: number;
   winner: "creator" | "counterparty";
@@ -140,11 +140,24 @@ export type DiceGameResult = {
   rolled_at: string;
 };
 
+export type ApplicationReleaseDecision = {
+  release_decision: string;
+  recipient: "creator" | "counterparty";
+  nonce: string;
+  timestamp: number;
+  result: DiceGameResult;
+  signatures: Array<{ pubkey: string; signature: string }>;
+};
+
 export type TrackedDiceGame = {
   id: string;
   created_at: string;
   updated_at: string;
   amount_sats: number;
+  game_mode?: import("./game-record").GameMode;
+  target?: number;
+  preferred_partner_pubkey?: string;
+  invite_delivery?: "nostr" | "manual";
   funding_model: string;
   refund_ln_address: string;
   local_role: "creator" | "counterparty";
@@ -157,13 +170,16 @@ export type TrackedDiceGame = {
   counterparty_status: FundStatusResponse | null;
   result: DiceGameResult | null;
   release: ReleaseEscrowResponse | null;
+  pending_release_decision?: ApplicationReleaseDecision | null;
   service: EscrowService;
   invite_funding_deadline?: string;
 };
 
 export type GameInvite = {
-  version: 1;
+  version: 1 | 2;
   game: "rollpot";
+  game_mode?: import("./game-record").GameMode;
+  target?: number;
   escrow_id: string;
   enrollment_token: string;
   counterparty_pubkey?: string;
