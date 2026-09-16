@@ -1,7 +1,6 @@
 import { RollpotClient } from "../components/rollpot-client";
 import { connection } from "next/server";
-import { DESCRIPTOR_URL } from "../lib/escrow";
-import { discoverSource } from "../lib/escrow-request";
+import { discoverConfiguredEscrow } from "../lib/escrow-request";
 import type { EscrowService } from "../lib/escrow";
 
 export default async function Home() {
@@ -9,7 +8,7 @@ export default async function Home() {
   let initialService: EscrowService | null = null;
 
   try {
-    initialService = await discoverSource({ type: "url", url: DESCRIPTOR_URL });
+    initialService = await discoverConfiguredEscrow();
   } catch {
     // Page renders without a preselected escrow when the default is unavailable.
   }

@@ -1,13 +1,44 @@
 import "server-only";
 
-import { verifyEvent, type Event as NostrEvent } from "nostr-tools";
+import { SimplePool, verifyEvent, type Event as NostrEvent } from "nostr-tools";
 import type { EscrowDescriptorSource, EscrowService } from "./escrow";
 import { discoverEscrowService, validateEscrowService } from "./escrow-server";
 
 const URL_SERVICE_CACHE_MS = 30_000;
+const COORDINATE_CACHE_MS = 30_000;
+const DEFAULT_RELAYS = ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"];
 type UrlServiceCache = Map<string, { expiresAt: number; service: Promise<EscrowService> }>;
-const backend = globalThis as typeof globalThis & { __rollpotValidatedUrlServices?: UrlServiceCache };
+type CoordinateServiceCache = Map<string, { expiresAt: number; service: Promise<EscrowService> }>;
+const backend = globalThis as typeof globalThis & { __rollpotValidatedUrlServices?: UrlServiceCache; __rollpotCoordinateServices?: CoordinateServiceCache };
 const validatedUrlServices = backend.__rollpotValidatedUrlServices ??= new Map();
+const coordinateServices = backend.__rollpotCoordinateServices ??= new Map();
+
+export async function discoverConfiguredEscrow(): Promise<EscrowService> {
+  const coordinate = process.env.ROLLPOT_DEFAULT_ESCROW_COORDINATE?.trim() || "";
+  if (!coordinate) throw new Error("ROLLPOT_DEFAULT_ESCROW_COORDINATE is not configured.");
+  const cached = coordinateServices.get(coordinate);
+  if (cached && cached.expiresAt > Date.now()) return cached.service;
+  const service = discoverEscrowCoordinate(coordinate);
+  coordinateServices.set(coordinate, { expiresAt: Date.now() + COORDINATE_CACHE_MS, service });
+  try { return await service; }
+  catch (error) { if (coordinateServices.get(coordinate)?.service === service) coordinateServices.delete(coordinate); throw error; }
+}
+
+export async function discoverEscrowCoordinate(coordinate: string): Promise<EscrowService> {
+  const match = /^30361:([0-9a-f]{64}):(.{1,512})$/.exec(coordinate);
+  if (!match) throw new Error("Escrow coordinate must be 30361:<publisher-pubkey>:<d-tag>.");
+  const [, publisher, identifier] = match;
+  const configured = process.env.ESCROW_DISCOVERY_RELAYS?.split(",").map((relay) => relay.trim()).filter(Boolean);
+  const relays = configured?.length ? configured : DEFAULT_RELAYS;
+  const pool = new SimplePool();
+  try {
+    const events = await pool.querySync(relays, { kinds: [30361], authors: [publisher], "#d": [identifier], limit: 20 }, { maxWait: 8000 });
+    const current = events.filter((event) => verifyEvent(event) && event.pubkey === publisher && event.tags.some(([name, value]) => name === "d" && value === identifier))
+      .sort((left, right) => right.created_at - left.created_at || left.id.localeCompare(right.id))[0];
+    if (!current) throw new Error(`No signed escrow descriptor was found for ${coordinate}.`);
+    return discoverSource({ type: "nostr", event: current });
+  } finally { pool.destroy(); }
+}
 
 export async function discoverSource(source: EscrowDescriptorSource | undefined) {
   if (!source) throw new Error("Missing escrow descriptor source.");
