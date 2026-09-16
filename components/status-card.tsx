@@ -2,7 +2,7 @@
 
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import { Box, Button, Chip, Stack, Tooltip, Typography } from "@mui/material";
+import { Box, Button, Stack, Tooltip, Typography } from "@mui/material";
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { isOwnPaymentConfirmed, type FundStatusResponse, type FundingInstructionsResponse } from "../lib/escrow";
@@ -33,12 +33,13 @@ export function FundingStatusCard({
 
     let cancelled = false;
 
-    QRCode.toDataURL(instructions.payment_request, {
-      width: 220,
-      margin: 1,
-      color: { dark: "#17251b", light: "#f8f2e8" },
-    }).then((url) => {
-      if (!cancelled) setQrDataUrl(url);
+    QRCode.toString(instructions.payment_request, {
+      type: "svg",
+      width: 360,
+      margin: 4,
+      color: { dark: "#000000", light: "#ffffff" },
+    }).then((svg) => {
+      if (!cancelled) setQrDataUrl(`data:image/svg+xml,${encodeURIComponent(svg)}`);
     }).catch(() => {
       // Silently skip QR generation on failure.
     });
@@ -58,12 +59,12 @@ export function FundingStatusCard({
         {instructions && !paid ? (
           <Stack spacing={1.2}>
             {qrDataUrl ? (
-              <Box sx={{ textAlign: "center" }}>
+              <Box sx={{ width: 360, maxWidth: "100%", mx: { xs: "auto", md: 0 }, p: 1.5, bgcolor: "#fff", border: "2px solid #d7e2d6", borderRadius: 2, boxShadow: "0 4px 20px rgba(0, 0, 0, 0.2)" }}>
                 <Box
                   component="img"
                   src={qrDataUrl}
                   alt="Lightning invoice QR code"
-                  sx={{ width: 200, height: 200, borderRadius: 1 }}
+                  sx={{ display: "block", width: "100%", height: "auto" }}
                 />
               </Box>
             ) : null}
@@ -82,12 +83,12 @@ export function FundingStatusCard({
             </Stack>
           </Stack>
         ) : null}
-        {status ? (
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-            <Chip size="small" label={paid ? "Your payment confirmed" : "Waiting for your payment"} color={paid ? "success" : "default"} />
-            {status.funded_count != null ? <Chip size="small" label={`${status.funded_count}/${status.funding_threshold || status.total_funders || "?"} funded`} /> : null}
-          </Stack>
-        ) : null}
+        {status ? <Typography variant="body2" color={paid ? "success.main" : "text.secondary"} aria-live="polite">
+          {[
+            paid ? "Your payment received" : instructions ? "Waiting for your payment" : "",
+            status.funded_count != null ? `${status.funded_count} of ${status.funding_threshold || status.total_funders || "?"} payments received` : "",
+          ].filter(Boolean).join(" · ")}
+        </Typography> : null}
       </Stack>
     </Box>
   );
